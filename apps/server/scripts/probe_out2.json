@@ -1,0 +1,374 @@
+[
+  {
+    "url": "https://emweb.securities.eastmoney.com/PC_HSF10/CompanySurvey/PageAjax",
+    "status": 200,
+    "keys": [
+      "jbzl",
+      "fxxg"
+    ],
+    "preview": {
+      "jbzl": "list[1]",
+      "fxxg": "list[1]"
+    },
+    "jbzl_sample": {
+      "SECUCODE": "002713.SZ",
+      "SECURITY_CODE": "002713",
+      "SECURITY_NAME_ABBR": "东易日盛",
+      "ORG_CODE": "10181719",
+      "ORG_NAME": "东易日盛家居装饰集团股份有限公司",
+      "ORG_NAME_EN": "Dong Yi Ri Sheng Home Decoration Group Co.,Ltd.",
+      "FORMERNAME": "N东易→东易日盛→*ST东易",
+      "STR_CODEA": "002713",
+      "STR_NAMEA": "东易日盛",
+      "STR_CODEB": null,
+      "STR_NAMEB": null,
+      "STR_CODEH": null,
+      "STR_NAMEH": null,
+      "SECURITY_TYPE": "深交所主板A股",
+      "EM2016": "建筑-装修装饰-装修装饰",
+      "TRADE_MARKET": "深圳证券交易所",
+      "INDUSTRYCSRC1": "建筑业-建筑装饰、装修和其他建筑业",
+      "PRESIDENT": "张建华",
+      "LEGAL_PERSON": "张建华",
+      "SECRETARY": "裴英杰",
+      "CHAIRMAN": "张建华",
+      "SECPRESENT": null,
+      "INDEDIRECTORS": "吕天文,靳文静,张承军",
+      "ORG_TEL": "010-84249181",
+      "ORG_EMAIL": "dyrs@dyrs.com.cn",
+      "ORG_FAX": "010-58636921",
+      "ORG_WEB": "www.dyrs.cn",
+      "ADDRESS": "北京市朝阳区安翔北里甲11号院1号楼北京创业大厦B座7层",
+      "REG_ADDRESS": "北京市房山区西潞街道长虹西路73号1幢2层215号",
+      "PROVINCE": "北京",
+      "ADDRESS_POSTCODE": "100101",
+      "REG_CAPITAL": 95140.5184,
+      "REG_NUM": "911100006330023135",
+      "EMP_NUM": 735,
+      "TATOLNUMBER": 8,
+      "LAW_FIRM": "北京和儒律师事务所",
+      "ACCOUNTFIRM_NAME": "大华会计师事务所(特殊普通合伙)",
+      "ORG_PROFILE": "    东易日盛家居装饰集团股份有限公司始创于1997年,2014年成为中国家装行业率先A股上市企业(股票代码:002713)。27年来,东易日盛一直深耕家装产业,以“装饰美好空间,筑就幸福生活”为使命,致力于为国人提供高品质的家装服务。集团现已发展成为一家囊括家装、工装、精工装、家具软装、科技等业务的综合性家居装饰集团。",
+      "BUSINESS_SCOPE": "许可项目:建设工程施工;施工专业作业;住宅室内装饰装修;建设工程设计;基础电信业务;第一类增值电信业务;第二类增值电信业务;(依法须经批准的项目,经相关部门批准后方可开展经营活动,具体经营项目以相关部门批准文件或许可证件为准)一般项目:信息技术咨询服务;工程管理服务;计算机软硬件及辅助设备零售;机械设备销售;电子产品销售;电子元器件与机电组件设备销售;互联网设备销售;网络设备销售;通讯设备销售;电线、电缆经营;建筑材料销售;金属材料销售;五金产品零售;化工产品销售(不含许可类化工产品);化工产品生产(不含许可类化工产品);家具销售;(除依法须经批准的项目外,凭营业执照依法自主开展经营活动)(不得从事国家和本市产业政策禁止和限制类项目的经营活动。)",
+      "EXPAND_NAME_ABBR": null
+    }
+  },
+  {
+    "url": "https://emweb.securities.eastmoney.com/PC_HSF10/CompanySurvey/PageAjax",
+    "status": 200,
+    "keys": [
+      "jbzl",
+      "fxxg"
+    ],
+    "preview": {
+      "jbzl": "list[1]",
+      "fxxg": "list[1]"
+    },
+    "jbzl_sample": {
+      "SECUCODE": "002713.SZ",
+      "SECURITY_CODE": "002713",
+      "SECURITY_NAME_ABBR": "东易日盛",
+      "ORG_CODE": "10181719",
+      "ORG_NAME": "东易日盛家居装饰集团股份有限公司",
+      "ORG_NAME_EN": "Dong Yi Ri Sheng Home Decoration Group Co.,Ltd.",
+      "FORMERNAME": "N东易→东易日盛→*ST东易",
+      "STR_CODEA": "002713",
+      "STR_NAMEA": "东易日盛",
+      "STR_CODEB": null,
+      "STR_NAMEB": null,
+      "STR_CODEH": null,
+      "STR_NAMEH": null,
+      "SECURITY_TYPE": "深交所主板A股",
+      "EM2016": "建筑-装修装饰-装修装饰",
+      "TRADE_MARKET": "深圳证券交易所",
+      "INDUSTRYCSRC1": "建筑业-建筑装饰、装修和其他建筑业",
+      "PRESIDENT": "张建华",
+      "LEGAL_PERSON": "张建华",
+      "SECRETARY": "裴英杰",
+      "CHAIRMAN": "张建华",
+      "SECPRESENT": null,
+      "INDEDIRECTORS": "吕天文,靳文静,张承军",
+      "ORG_TEL": "010-84249181",
+      "ORG_EMAIL": "dyrs@dyrs.com.cn",
+      "ORG_FAX": "010-58636921",
+      "ORG_WEB": "www.dyrs.cn",
+      "ADDRESS": "北京市朝阳区安翔北里甲11号院1号楼北京创业大厦B座7层",
+      "REG_ADDRESS": "北京市房山区西潞街道长虹西路73号1幢2层215号",
+      "PROVINCE": "北京",
+      "ADDRESS_POSTCODE": "100101",
+      "REG_CAPITAL": 95140.5184,
+      "REG_NUM": "911100006330023135",
+      "EMP_NUM": 735,
+      "TATOLNUMBER": 8,
+      "LAW_FIRM": "北京和儒律师事务所",
+      "ACCOUNTFIRM_NAME": "大华会计师事务所(特殊普通合伙)",
+      "ORG_PROFILE": "    东易日盛家居装饰集团股份有限公司始创于1997年,2014年成为中国家装行业率先A股上市企业(股票代码:002713)。27年来,东易日盛一直深耕家装产业,以“装饰美好空间,筑就幸福生活”为使命,致力于为国人提供高品质的家装服务。集团现已发展成为一家囊括家装、工装、精工装、家具软装、科技等业务的综合性家居装饰集团。",
+      "BUSINESS_SCOPE": "许可项目:建设工程施工;施工专业作业;住宅室内装饰装修;建设工程设计;基础电信业务;第一类增值电信业务;第二类增值电信业务;(依法须经批准的项目,经相关部门批准后方可开展经营活动,具体经营项目以相关部门批准文件或许可证件为准)一般项目:信息技术咨询服务;工程管理服务;计算机软硬件及辅助设备零售;机械设备销售;电子产品销售;电子元器件与机电组件设备销售;互联网设备销售;网络设备销售;通讯设备销售;电线、电缆经营;建筑材料销售;金属材料销售;五金产品零售;化工产品销售(不含许可类化工产品);化工产品生产(不含许可类化工产品);家具销售;(除依法须经批准的项目外,凭营业执照依法自主开展经营活动)(不得从事国家和本市产业政策禁止和限制类项目的经营活动。)",
+      "EXPAND_NAME_ABBR": null
+    }
+  },
+  {
+    "url": "https://emweb.securities.eastmoney.com/PC_HSF10/CompanySurvey/PageAjax",
+    "status": 200,
+    "keys": [
+      "jbzl",
+      "fxxg"
+    ],
+    "preview": {
+      "jbzl": "list[1]",
+      "fxxg": "list[1]"
+    },
+    "jbzl_sample": {
+      "SECUCODE": "002713.SZ",
+      "SECURITY_CODE": "002713",
+      "SECURITY_NAME_ABBR": "东易日盛",
+      "ORG_CODE": "10181719",
+      "ORG_NAME": "东易日盛家居装饰集团股份有限公司",
+      "ORG_NAME_EN": "Dong Yi Ri Sheng Home Decoration Group Co.,Ltd.",
+      "FORMERNAME": "N东易→东易日盛→*ST东易",
+      "STR_CODEA": "002713",
+      "STR_NAMEA": "东易日盛",
+      "STR_CODEB": null,
+      "STR_NAMEB": null,
+      "STR_CODEH": null,
+      "STR_NAMEH": null,
+      "SECURITY_TYPE": "深交所主板A股",
+      "EM2016": "建筑-装修装饰-装修装饰",
+      "TRADE_MARKET": "深圳证券交易所",
+      "INDUSTRYCSRC1": "建筑业-建筑装饰、装修和其他建筑业",
+      "PRESIDENT": "张建华",
+      "LEGAL_PERSON": "张建华",
+      "SECRETARY": "裴英杰",
+      "CHAIRMAN": "张建华",
+      "SECPRESENT": null,
+      "INDEDIRECTORS": "吕天文,靳文静,张承军",
+      "ORG_TEL": "010-84249181",
+      "ORG_EMAIL": "dyrs@dyrs.com.cn",
+      "ORG_FAX": "010-58636921",
+      "ORG_WEB": "www.dyrs.cn",
+      "ADDRESS": "北京市朝阳区安翔北里甲11号院1号楼北京创业大厦B座7层",
+      "REG_ADDRESS": "北京市房山区西潞街道长虹西路73号1幢2层215号",
+      "PROVINCE": "北京",
+      "ADDRESS_POSTCODE": "100101",
+      "REG_CAPITAL": 95140.5184,
+      "REG_NUM": "911100006330023135",
+      "EMP_NUM": 735,
+      "TATOLNUMBER": 8,
+      "LAW_FIRM": "北京和儒律师事务所",
+      "ACCOUNTFIRM_NAME": "大华会计师事务所(特殊普通合伙)",
+      "ORG_PROFILE": "    东易日盛家居装饰集团股份有限公司始创于1997年,2014年成为中国家装行业率先A股上市企业(股票代码:002713)。27年来,东易日盛一直深耕家装产业,以“装饰美好空间,筑就幸福生活”为使命,致力于为国人提供高品质的家装服务。集团现已发展成为一家囊括家装、工装、精工装、家具软装、科技等业务的综合性家居装饰集团。",
+      "BUSINESS_SCOPE": "许可项目:建设工程施工;施工专业作业;住宅室内装饰装修;建设工程设计;基础电信业务;第一类增值电信业务;第二类增值电信业务;(依法须经批准的项目,经相关部门批准后方可开展经营活动,具体经营项目以相关部门批准文件或许可证件为准)一般项目:信息技术咨询服务;工程管理服务;计算机软硬件及辅助设备零售;机械设备销售;电子产品销售;电子元器件与机电组件设备销售;互联网设备销售;网络设备销售;通讯设备销售;电线、电缆经营;建筑材料销售;金属材料销售;五金产品零售;化工产品销售(不含许可类化工产品);化工产品生产(不含许可类化工产品);家具销售;(除依法须经批准的项目外,凭营业执照依法自主开展经营活动)(不得从事国家和本市产业政策禁止和限制类项目的经营活动。)",
+      "EXPAND_NAME_ABBR": null
+    }
+  },
+  {
+    "url": "https://push2delay.eastmoney.com/api/qt/stock/get",
+    "status": 200,
+    "keys": [
+      "rc",
+      "rt",
+      "svr",
+      "lt",
+      "full",
+      "dlmkts",
+      "dsc",
+      "data"
+    ],
+    "preview": {
+      "rc": 0,
+      "rt": 4,
+      "svr": 177622162,
+      "lt": 1,
+      "full": 1,
+      "dlmkts": "8,10,128",
+      "dsc": "0",
+      "data": [
+        "f43",
+        "f57",
+        "f58",
+        "f84",
+        "f85",
+        "f116",
+        "f117"
+      ]
+    },
+    "data": {
+      "f43": 10.92,
+      "f57": "002713",
+      "f58": "东易日盛",
+      "f84": 951405184.0,
+      "f85": 524116059.0,
+      "f116": 10389344609.28,
+      "f117": 5723347364.28
+    }
+  },
+  {
+    "url": "https://82.push2.eastmoney.com/api/qt/stock/get",
+    "status": 200,
+    "keys": [
+      "rc",
+      "rt",
+      "svr",
+      "lt",
+      "full",
+      "dlmkts",
+      "dsc",
+      "data"
+    ],
+    "preview": {
+      "rc": 0,
+      "rt": 4,
+      "svr": 183638418,
+      "lt": 1,
+      "full": 1,
+      "dlmkts": "",
+      "dsc": "0",
+      "data": [
+        "f43",
+        "f57",
+        "f58",
+        "f84",
+        "f85",
+        "f116",
+        "f117"
+      ]
+    },
+    "data": {
+      "f43": 10.92,
+      "f57": "002713",
+      "f58": "东易日盛",
+      "f84": 951405184.0,
+      "f85": 524116059.0,
+      "f116": 10389344609.28,
+      "f117": 5723347364.28
+    }
+  },
+  {
+    "url": "https://emweb.securities.eastmoney.com/PC_HSF10/CoreConception/PageAjax",
+    "status": 200,
+    "keys": [
+      "ssbk",
+      "hxtc"
+    ],
+    "preview": {
+      "ssbk": "list[17]",
+      "hxtc": "list[10]"
+    },
+    "ssbk_sample": {
+      "SECUCODE": "002713.SZ",
+      "SECURITY_CODE": "002713",
+      "SECURITY_NAME_ABBR": "东易日盛",
+      "BOARD_CODE": "1209",
+      "BOARD_NAME": "建筑装饰",
+      "IS_PRECISE": null,
+      "BOARD_RANK": 1
+    },
+    "hxtc_sample": {
+      "SECUCODE": "002713.SZ",
+      "SECURITY_CODE": "002713",
+      "SECURITY_NAME_ABBR": "东易日盛",
+      "KEYWORD": "经营范围",
+      "MAINPOINT": 2,
+      "MAINPOINT_CONTENT": "许可项目:建设工程施工;施工专业作业;住宅室内装饰装修;建设工程设计;基础电信业务;第一类增值电信业务;第二类增值电信业务;(依法须经批准的项目,经相关部门批准后方可开展经营活动,具体经营项目以相关部门批准文件或许可证件为准)一般项目:信息技术咨询服务;工程管理服务;计算机软硬件及辅助设备零售;机械设备销售;电子产品销售;电子元器件与机电组件设备销售;互联网设备销售;网络设备销售;通讯设备销售;电线、电缆经营;建筑材料销售;金属材料销售;五金产品零售;化工产品销售(不含许可类化工产品);化工产品生产(不含许可类化工产品);家具销售;(除依法须经批准的项目外,凭营业执照依法自主开展经营活动)(不得从事国家和本市产业政策禁止和限制类项目的经营活动。)",
+      "KEY_CLASSIF": "经营范围",
+      "KEY_CLASSIF_CODE": "002",
+      "IS_POINT": "0"
+    }
+  },
+  {
+    "url": "https://emweb.securities.eastmoney.com/PC_HSF10/ShareholderResearch/PageAjax",
+    "status": 200,
+    "keys": [
+      "gdrs",
+      "sdltgd_date",
+      "sdgd_date",
+      "sjkzr",
+      "jgcc_date",
+      "sdgdcgbd",
+      "jjcg_date",
+      "xsjj",
+      "sdltgd",
+      "ltgf",
+      "sdgd",
+      "jgcc",
+      "jjcg"
+    ],
+    "preview": {
+      "gdrs": "list[10]",
+      "sdltgd_date": "list[5]",
+      "sdgd_date": "list[50]",
+      "sjkzr": "list[1]",
+      "jgcc_date": "list[5]",
+      "sdgdcgbd": "list[1]",
+      "jjcg_date": "list[5]",
+      "xsjj": "list[2]",
+      "sdltgd": "list[10]",
+      "ltgf": "list[1]",
+      "sdgd": "list[3]",
+      "jgcc": "list[2]",
+      "jjcg": "list[8]"
+    },
+    "sdgd_sample": {
+      "SECUCODE": "002713.SZ",
+      "SECURITY_CODE": "002713",
+      "END_DATE": "2026-08-27 00:00:00",
+      "HOLDER_RANK": 1,
+      "HOLDER_NAME": "华著科技(集团)有限公司",
+      "SHARES_TYPE": "限售流通A股",
+      "HOLD_NUM": 150000000,
+      "HOLD_NUM_RATIO": 15.77,
+      "HOLD_NUM_CHANGE": "不变",
+      "CHANGE_RATIO": null
+    },
+    "gdrs_sample": {
+      "SECUCODE": "002713.SZ",
+      "SECURITY_CODE": "002713",
+      "END_DATE": "2026-08-31 00:00:00",
+      "HOLDER_TOTAL_NUM": 24900,
+      "TOTAL_NUM_RATIO": 17.7528,
+      "AVG_FREE_SHARES": 21048,
+      "AVG_FREESHARES_RATIO": -15.076305220884,
+      "HOLD_FOCUS": "较集中",
+      "PRICE": 9.48,
+      "AVG_HOLD_AMT": 199542.981498795,
+      "HOLD_RATIO_TOTAL": null,
+      "FREEHOLD_RATIO_TOTAL": null
+    }
+  },
+  {
+    "url": "https://datacenter-web.eastmoney.com/api/data/v1/get",
+    "status": 200,
+    "keys": [
+      "version",
+      "result",
+      "success",
+      "message",
+      "code"
+    ],
+    "preview": {
+      "version": null,
+      "result": null,
+      "success": false,
+      "message": "报表配置不存在,RPT_F10_INFO_ORGPROFILE",
+      "code": 9501
+    }
+  },
+  {
+    "url": "https://datacenter-web.eastmoney.com/api/data/v1/get",
+    "status": 200,
+    "keys": [
+      "version",
+      "result",
+      "success",
+      "message",
+      "code"
+    ],
+    "preview": {
+      "version": null,
+      "result": null,
+      "success": false,
+      "message": "报表配置不存在,RPT_F10_INFO_SECURITY",
+      "code": 9501
+    }
+  }
+]

@@ -1,0 +1,100 @@
+[
+  {
+    "url": "https://data.10jqka.com.cn/dataapi/limit_up/limit_pool?filter=HS,GEM2STAR&order_field=first_limit_up_time&order_type=0&limit=100&page=1",
+    "http": 404,
+    "api": 404,
+    "msg": "url不存在"
+  },
+  {
+    "url": "https://data.10jqka.com.cn/dataapi/limit_up/up_pool?filter=HS,GEM2STAR&order_field=first_limit_up_time&order_type=0&limit=100&page=1",
+    "http": 404,
+    "api": 404,
+    "msg": "url不存在"
+  },
+  {
+    "url": "https://data.10jqka.com.cn/dataapi/limit_up/pool?filter=HS,GEM2STAR&order_field=first_limit_up_time&order_type=0&limit=100&page=1",
+    "http": 404,
+    "api": 404,
+    "msg": "url不存在"
+  },
+  {
+    "url": "https://data.10jqka.com.cn/dataapi/limit_up/limit_up_pool?filter=HS,GEM2STAR&order_field=first_limit_up_time&order_type=0&limit=100&page=1",
+    "http": 200,
+    "api": 0,
+    "msg": "success",
+    "keys": [
+      "page",
+      "info",
+      "limit_up_count",
+      "limit_down_count",
+      "date",
+      "msg",
+      "trade_status"
+    ],
+    "len": 77,
+    "sample": {
+      "code": "600881",
+      "is_new": 0,
+      "name": "亚泰集团",
+      "high_days_value": null,
+      "market_id": 17,
+      "change_tag": "FIRST_LIMIT",
+      "is_again_limit": 0,
+      "market_type": "HS"
+    }
+  },
+  {
+    "url": "https://data.10jqka.com.cn/v2/limit_up/limit_up_pool?filter=HS,GEM2STAR&order_field=first_limit_up_time&order_type=0&limit=100&page=1",
+    "error": "Expecting value: line 1 column 1 (char 0)"
+  },
+  {
+    "url": "https://data.10jqka.com.cn/dataapi/limit_up/getLimitUpPool?filter=HS,GEM2STAR&page=1&limit=100",
+    "http": 404,
+    "api": 404,
+    "msg": "url不存在"
+  },
+  {
+    "url": "https://data.10jqka.com.cn/dataapi/limit_up/continuous_limit_pool?filter=HS,GEM2STAR&order_field=continue_num&order_type=1&limit=5&page=1",
+    "http": 200,
+    "api": 0,
+    "msg": "success",
+    "keys": [
+      "page",
+      "info",
+      "limit_up_count",
+      "limit_down_count",
+      "date",
+      "msg",
+      "trade_status"
+    ],
+    "len": 5,
+    "sample": {
+      "code": "600127",
+      "is_new": 0,
+      "name": "金健米业",
+      "high_days_value": null,
+      "market_id": 17,
+      "change_tag": "LIMIT_BACK",
+      "is_again_limit": 1,
+      "market_type": "HS"
+    }
+  },
+  {
+    "url": "https://data.10jqka.com.cn/dataapi/limit_up/limit_detail?filter=HS,GEM2STAR&date=2026-09-18",
+    "http": 404,
+    "api": 404,
+    "msg": "url不存在"
+  },
+  {
+    "url": "https://data.10jqka.com.cn/dataapi/limit_up/limit_detail?date=20260918",
+    "http": 404,
+    "api": 404,
+    "msg": "url不存在"
+  },
+  {
+    "url": "https://data.10jqka.com.cn/dataapi/limit_up/day_pool?date=2026-09-18&filter=HS,GEM2STAR",
+    "http": 404,
+    "api": 404,
+    "msg": "url不存在"
+  }
+]

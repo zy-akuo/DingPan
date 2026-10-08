@@ -1,0 +1,355 @@
+[
+  {
+    "url": "https://push2.eastmoney.com/api/qt/stock/get",
+    "error": "Server disconnected without sending a response."
+  },
+  {
+    "url": "https://emweb.securities.eastmoney.com/PC_HSF10/CompanySurvey/PageAjax",
+    "status": 200,
+    "keys": [
+      "status",
+      "message"
+    ],
+    "detail": {
+      "status": -1,
+      "message": "股票代码不合法"
+    }
+  },
+  {
+    "url": "https://emweb.securities.eastmoney.com/PC_HSF10/ShareholderResearch/PageAjax",
+    "status": 200,
+    "keys": [
+      "status",
+      "message"
+    ],
+    "detail": {
+      "status": -1,
+      "message": "股票代码不合法"
+    }
+  },
+  {
+    "url": "https://emweb.securities.eastmoney.com/PC_HSF10/CoreConception/PageAjax",
+    "status": 200,
+    "keys": [
+      "status",
+      "message"
+    ],
+    "detail": {
+      "status": -1,
+      "message": "股票代码不合法"
+    }
+  },
+  {
+    "url": "https://datacenter-web.eastmoney.com/api/data/v1/get",
+    "status": 200,
+    "keys": [
+      "version",
+      "result",
+      "success",
+      "message",
+      "code"
+    ],
+    "detail": {
+      "version": "97c1ceb203cffaae190b100fcb9c8e3d",
+      "result": {
+        "keys": [
+          "pages",
+          "data",
+          "count"
+        ],
+        "data_len": 20,
+        "sample": {
+          "SECUCODE": "002713.SZ",
+          "SECURITY_CODE": "002713",
+          "ORG_CODE": "10181719",
+          "END_DATE": "2026-08-27 00:00:00",
+          "HOLDER_NAME": "华著科技(集团)有限公司",
+          "HOLD_NUM": 150000000,
+          "HOLD_NUM_RATIO": 15.77,
+          "HOLD_NUM_CHANGE": "不变",
+          "CHANGE_RATIO": null,
+          "HOLDER_CODE": "10000666917",
+          "IS_HOLDORG": "1",
+          "SECURITY_TYPE_CODE": "058001001",
+          "SECURITY_NAME_ABBR": "东易日盛",
+          "HOLDER_RANK": 1,
+          "HOLDER_STATE": null,
+          "HOLDER_MARKET_CAP": 1452000000,
+          "HOLDER_NEW": "10000666917",
+          "HOLD_RATIO_QOQ": "不变",
+          "IS_REPORT": "0",
+          "HOLDER_STATEE": null,
+          "SHARES_TYPE": "限售流通A股",
+          "HOLDER_CODE_OLD": "81646093",
+          "NEW_CHANGE_RATIO": "不变",
+          "HOLDER_STATE_NEW": "不变",
+          "TOTAL_SHARES_NUM": 951405184,
+          "HOLD_NUM_ABBR": "华著科技(集团)有限公司"
+        }
+      },
+      "success": true,
+      "message": "ok",
+      "code": 0
+    }
+  },
+  {
+    "url": "https://datacenter-web.eastmoney.com/api/data/v1/get",
+    "status": 200,
+    "keys": [
+      "version",
+      "result",
+      "success",
+      "message",
+      "code"
+    ],
+    "detail": {
+      "version": "0a4ca69ea826983f4ab137c9dd7f5f95",
+      "result": {
+        "keys": [
+          "pages",
+          "data",
+          "count"
+        ],
+        "data_len": 20,
+        "sample": {
+          "SECUCODE": "002713.SZ",
+          "SECURITY_CODE": "002713",
+          "ORG_CODE": "10181719",
+          "END_DATE": "2026-06-30 00:00:00",
+          "HOLDER_NAME": "天津东易霖鲲科技有限公司",
+          "HOLD_NUM": 67738128,
+          "FREE_HOLDNUM_RATIO": 12.924261112938,
+          "HOLD_NUM_CHANGE": "不变",
+          "CHANGE_RATIO": null,
+          "IS_HOLDORG": "1",
+          "HOLDER_RANK": 1,
+          "SECURITY_NAME_ABBR": "东易日盛",
+          "HOLDER_CODE": "10186919",
+          "SECURITY_TYPE_CODE": "058001001",
+          "HOLDER_STATE": null,
+          "HOLDER_MARKET_CAP": 858242081.76,
+          "HOLD_RATIO": 7.1198,
+          "HOLD_CHANGE": "不变",
+          "HOLD_RATIO_CHANGE": 0,
+          "HOLDER_TYPE": "投资公司",
+          "SHARES_TYPE": "A股",
+          "UPDATE_DATE": "2026-08-26 00:00:00",
+          "REPORT_DATE_NAME": "2026中报",
+          "HOLDER_NEW": "10186919",
+          "FREE_RATIO_QOQ": "0.45500838",
+          "HOLDER_STATEE": null,
+          "IS_REPORT": "1",
+          "HOLDER_CODE_OLD": "80200004",
+          "HOLDER_NEWTYPE": "其他",
+          "HOLDNUM_CHANGE_NAME": "不变",
+          "IS_MAX_REPORTDATE": "1",
+          "COOPERATION_HOLDER_MARK": "10186919",
+          "MXID": "e26a0b7d89f8993c9ecd19f7eb5249a3",
+          "LISTING_STATE": "0",
+          "XZCHANGE": 0,
+          "NEW_CHANGE_RATIO": "不变",
+          "HOLDER_STATE_NEW": "不变",
+          "HOLD_ORG_CODE_SOURCE": "c653a9e2-3af1-4fdc-b0ed-9376c266a856",
+          "HOLD_CHANGE_RATIOTB": -12.8499,
+          "HOLD_NUM_ABBR": "天津东易霖鲲科技有限公司",
+          "IS_DJG": "0",
+          "IS_SJKZR": "0",
+          "CAMRELATION_GROUP_LABEL": null,
+          "IS_LANDSTOCK": "0",
+          "HOLDER_RELATION_LABLE": null,
+          "LISTED_SHARES_RATIO": 12.6723,
+          "NOTICE_DATE": "2026-08-26 00:00:00"
+        }
+      },
+      "success": true,
+      "message": "ok",
+      "code": 0
+    }
+  },
+  {
+    "url": "https://datacenter-web.eastmoney.com/api/data/v1/get",
+    "status": 200,
+    "keys": [
+      "version",
+      "result",
+      "success",
+      "message",
+      "code"
+    ],
+    "detail": {
+      "version": "2155f5bcf00f43686ac1dc62a33812c3",
+      "result": {
+        "keys": [
+          "pages",
+          "data",
+          "count"
+        ],
+        "data_len": 5,
+        "sample": {
+          "SECUCODE": "002713.SZ",
+          "SECURITY_CODE": "002713",
+          "ORG_CODE": "10181719",
+          "END_DATE": "2026-06-30 00:00:00",
+          "CHANGE_REASON": "高管股份变动",
+          "LIMITED_SHARES": 427289125,
+          "UNLIMITED_SHARES": 524116059,
+          "TOTAL_SHARES": 951405184,
+          "LIMITED_SHARES_RATIO": 44.911372376966,
+          "LISTED_SHARES_RATIO": 55.088627623034,
+          "TOTAL_SHARES_RATIO": "100.00",
+          "LISTED_A_SHARES": 524116059,
+          "LIMITED_A_SHARES": 427289125,
+          "LISTED_A_SHARES_RATIO": 55.088627623034,
+          "LIMITED_A_SHARES_RATIO": 44.911372376966,
+          "B_FREE_SHARE": null,
+          "H_FREE_SHARE": null,
+          "B_FREE_SHARE_RATIO": null,
+          "H_FREE_SHARE_RATIO": null,
+          "SECURITY_TYPE_CODE": "058001001",
+          "NON_FREE_SHARES": null,
+          "NON_FREESHARES_RATIO": null,
+          "LIMITED_B_SHARES": null,
+          "LIMITED_BSHARES_RATIO": null,
+          "OTHER_FREE_SHARES": null,
+          "OTHER_FREESHARES_RATIO": null,
+          "LIMITED_STATE_SHARES": null,
+          "LIMITED_STATE_LEGAL": null,
+          "LIMITED_OTHARS": 416868204,
+          "LIMITED_DOMESTIC_NOSTATE": 416868204,
+          "LIMITED_DOMESTIC_NATURAL": null,
+          "LOCK_SHARES": 10420921,
+          "LIMITED_FOREIGN_SHARES": null,
+          "LIMITED_OVERSEAS_NOSTATE": null,
+          "LIMITED_OVERSEAS_NATURAL": null,
+          "LIMITED_H_SHARES": null,
+          "SPONSOR_SHARES": null,
+          "STATE_SPONSOR_SHARES": null,
+          "SPONSOR_SOCIAL_SHARES": null,
+          "RAISE_SHARES": null,
+          "RAISE_STATE_SHARES": null,
+          "RAISE_DOMESTIC_SHARES": null,
+          "RAISE_OVERSEAS_SHARES": null,
+          "NOTICE_DATE": "2026-08-26 00:00:00",
+          "LISTING_DATE": "2026-06-30 00:00:00",
+          "LIMITED_SHARES_CHANGE": 2384772,
+          "UNLIMITED_SHARES_CHANGE": -2384772,
+          "TOTAL_SHARES_CHANGE": 0,
+          "LISTED_ASHARES_CHANGE": -2384772,
+          "LIMITED_ASHARES_CHANGE": 2384772,
+          "B_FREESHARE_CHANGE": null,
+          "H_FREESHARE_CHANGE": null,
+          "LIMITED_BSHARES_CHANGE": 0,
+          "NONFREE_SHARES_CHANGE": null,
+          "OTHERFREE_SHARES_CHANGE": null,
+          "FREE_SHARES": 951405184,
+          "CHANGE_REASON_EXPLAIN": "中报披露",
+          "LIMITED_H_SHARES_RATIO": null,
+          "LIMITED_H_SHARES_CHANGE": null,
+          "IS_FREE_WINDOW": "0",
+          "IS_LIMITED_WINDOW": "0",
+          "LISTED_A_RATIOPC": 100,
+          "LISTED_B_RATIOPC": null,
+          "LISTED_H_RATIOPC": null,
+          "LISTED_OTHER_RATIOPC": null,
+          "LISTED_SUM_RATIOPC": 100,
+          "MARKET_CODE": "0",
+          "IS_USE": "1",
+          "SECURITY_NAME_ABBR": "东易日盛",
+          "INFO_CODE": "AN202608250006748813",
+          "TOTAL_A_SHARES": 951405184,
+          "FREELIQCI_SHARES": 392184109,
+          "PREFERRED_SHARES": null
+        }
+      },
+      "success": true,
+      "message": "ok",
+      "code": 0
+    }
+  },
+  {
+    "url": "https://push2.eastmoney.com/api/qt/slist/get",
+    "status": 200,
+    "keys": [
+      "rc",
+      "rt",
+      "svr",
+      "lt",
+      "full",
+      "dlmkts",
+      "dsc",
+      "data"
+    ],
+    "detail": {
+      "rc": 0,
+      "rt": 18,
+      "svr": 180606313,
+      "lt": 1,
+      "full": 1,
+      "dlmkts": "",
+      "dsc": "0",
+      "data": {
+        "keys": [
+          "total",
+          "diff"
+        ],
+        "sample": {
+          "total": 13,
+          "diff": [
+            {
+              "f12": "BK1478",
+              "f14": "装修装饰Ⅲ"
+            },
+            {
+              "f12": "BK1209",
+              "f14": "建筑装饰"
+            },
+            {
+              "f12": "BK0725",
+              "f14": "装修装饰Ⅱ"
+            },
+            {
+              "f12": "BK0150",
+              "f14": "北京板块"
+            },
+            {
+              "f12": "BK1693",
+              "f14": "近期摘帽"
+            },
+            {
+              "f12": "BK1134",
+              "f14": "算力概念"
+            },
+            {
+              "f12": "BK0945",
+              "f14": "装配建筑"
+            },
+            {
+              "f12": "BK0833",
+              "f14": "小米概念"
+            },
+            {
+              "f12": "BK0813",
+              "f14": "雄安新区"
+            },
+            {
+              "f12": "BK0804",
+              "f14": "深股通"
+            },
+            {
+              "f12": "BK0800",
+              "f14": "人工智能"
+            },
+            {
+              "f12": "BK0680",
+              "f14": "智能家居"
+            },
+            {
+              "f12": "BK0637",
+              "f14": "互联网金融"
+            }
+          ]
+        }
+      }
+    }
+  }
+]

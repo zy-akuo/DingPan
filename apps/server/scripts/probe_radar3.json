@@ -1,0 +1,373 @@
+[
+  {
+    "url": "https://data.10jqka.com.cn/dataapi/limit_up/limit_detail?filter=HS,GEM2STAR&date=&stock_code=600630",
+    "status": 404,
+    "status_code": 404,
+    "status_msg": "url不存在",
+    "data": null
+  },
+  {
+    "url": "https://data.10jqka.com.cn/dataapi/limit_up/stock_pool?filter=HS,GEM2STAR&order_field=first_limit_up_time&order_type=0&limit=200&page=1",
+    "status": 404,
+    "status_code": 404,
+    "status_msg": "url不存在",
+    "data": null
+  },
+  {
+    "url": "https://data.10jqka.com.cn/dataapi/limit_up/lower_limit_pool?filter=HS,GEM2STAR&order_field=first_limit_up_time&order_type=0&limit=50&page=1",
+    "status": 200,
+    "status_code": 0,
+    "status_msg": "success",
+    "data_keys": [
+      "page",
+      "info",
+      "limit_up_count",
+      "limit_down_count",
+      "date",
+      "msg",
+      "trade_status"
+    ],
+    "sample": {
+      "page": {
+        "limit": 50,
+        "total": 0,
+        "count": 0,
+        "page": 0
+      },
+      "info": [],
+      "limit_up_count": {
+        "today": {
+          "num": 77,
+          "history_num": 102,
+          "rate": 0.7549019607843137,
+          "open_num": 25
+        },
+        "yesterday": {
+          "num": 47,
+          "history_num": 67,
+          "rate": 0.7014925373134329,
+          "open_num": 20
+        }
+      },
+      "limit_down_count": {
+        "today": {
+          "num": 0,
+          "history_num": 0,
+          "rate": null,
+          "open_num": 0
+        },
+        "yesterday": {
+          "num": 1,
+          "history_num": 6,
+          "rate": 0.16666666666666666,
+          "open_num": 5
+        }
+      },
+      "date": "20260918",
+      "msg": null,
+      "trade_status": {
+        "id": "non_trading_day",
+        "name": "非交易日",
+        "start_time": "00:00",
+        "end_time": "23:59:59.999"
+      }
+    }
+  },
+  {
+    "url": "https://data.10jqka.com.cn/dataapi/limit_up/explosion_pool?filter=HS,GEM2STAR&order_field=first_limit_up_time&order_type=0&limit=50&page=1",
+    "status": 404,
+    "status_code": 404,
+    "status_msg": "url不存在",
+    "data": null
+  },
+  {
+    "url": "https://data.10jqka.com.cn/dataapi/limit_up/continuous_limit_pool?filter=HS,GEM2STAR&order_field=continue_num&order_type=1&limit=50&page=1",
+    "status": 200,
+    "status_code": 0,
+    "status_msg": "success",
+    "data_keys": [
+      "page",
+      "info",
+      "limit_up_count",
+      "limit_down_count",
+      "date",
+      "msg",
+      "trade_status"
+    ],
+    "sample": {
+      "page": {
+        "limit": 50,
+        "total": 18,
+        "count": 1,
+        "page": 1
+      },
+      "info": [
+        {
+          "code": "600127",
+          "is_new": 0,
+          "name": "金健米业",
+          "high_days_value": null,
+          "market_id": 17,
+          "change_tag": "LIMIT_BACK",
+          "is_again_limit": 1,
+          "market_type": "HS"
+        },
+        {
+          "code": "002161",
+          "is_new": 0,
+          "name": "远望谷",
+          "high_days_value": null,
+          "market_id": 33,
+          "change_tag": "FIRST_LIMIT",
+          "is_again_limit": 0,
+          "market_type": "HS"
+        },
+        {
+          "code": "603353",
+          "is_new": 0,
+          "name": "和顺石油",
+          "high_days_value": null,
+          "market_id": 17,
+          "change_tag": "LIMIT_BACK",
+          "is_again_limit": 1,
+          "market_type": "HS"
+        },
+        {
+          "code": "601579",
+          "is_new": 0,
+          "name": "会稽山",
+          "high_days_value": null,
+          "market_id": 17,
+          "change_tag": "LIMIT_BACK",
+          "is_again_limit": 1,
+          "market_type": "HS"
+        },
+        {
+          "code": "001216",
+          "is_new": 0,
+          "name": "华瓷股份",
+          "high_days_value": null,
+          "market_id": 33,
+          "change_tag": "LIMIT_BACK",
+          "is_again_limit": 1,
+          "market_type": "HS"
+        },
+        {
+          "code": "600448",
+          "is_new": 0,
+          "name": "华纺股份",
+          "high_days_value": null,
+          "market_id": 17,
+          "change_tag": "FIRST_LIMIT",
+          "is_again_limit": 0,
+          "market_type": "HS"
+        },
+        {
+          "code": "301390",
+          "is_new": 0,
+          "name": "经纬股份",
+          "high_days_value": null,
+          "market_id": 33,
+          "change_tag": "FIRST_LIMIT",
+          "is_again_limit": 0,
+          "market_type": "GEM"
+        },
+        {
+          "code": "000504",
+          "is_new": 0,
+          "name": "南华生物",
+          "high_days_value": null,
+          "market_id": 33,
+          "change_tag": "LIMIT_BACK",
+          "is_again_limit": 1,
+          "market_type": "HS"
+        },
+        {
+          "code": "002836",
+          "is_new": 0,
+          "name": "新宏泽",
+          "high_days_value": null,
+          "market_id": 33,
+          "change_tag": "LIMIT_BACK",
+          "is_again_limit": 1,
+          "market_type": "HS"
+        },
+        {
+          "code": "002285",
+          "is_new": 0,
+          "name": "世联行",
+          "high_days_value": null,
+          "market_id": 33,
+          "change_tag": "LIMIT_BACK",
+          "is_again_limit": 1,
+          "market_type": "HS"
+        },
+        {
+          "code": "002453",
+          "is_new": 0,
+          "name": "华软科技",
+          "high_days_value": null,
+          "market_id": 33,
+          "change_tag": "LIMIT_BACK",
+          "is_again_limit": 1,
+          "market_type": "HS"
+        },
+        {
+          "code": "600630",
+          "is_new": 0,
+          "name": "龙头股份",
+          "high_days_value": null,
+          "market_id": 17,
+          "change_tag": "LIMIT_BACK",
+          "is_again_limit": 1,
+          "market_type": "HS"
+        },
+        {
+          "code": "603230",
+          "is_new": 0,
+          "name": "内蒙新华",
+          "high_days_value": null,
+          "market_id": 17,
+          "change_tag": "LIMIT_BACK",
+          "is_again_limit": 1,
+          "market_type": "HS"
+        },
+        {
+          "code": "603122",
+          "is_new": 0,
+          "name": "合富中国",
+          "high_days_value": null,
+          "market_id": 17,
+          "change_tag": "LIMIT_BACK",
+          "is_again_limit": 1,
+          "market_type": "HS"
+        },
+        {
+          "code": "603626",
+          "is_new": 0,
+          "name": "科森科技",
+          "high_days_value": null,
+          "market_id": 17,
+          "change_tag": "LIMIT_BACK",
+          "is_again_limit": 1,
+          "market_type": "HS"
+        },
+        {
+          "code": "002631",
+          "is_new": 0,
+          "name": "德尔未来",
+          "high_days_value": null,
+          "market_id": 33,
+          "change_tag": "LIMIT_FAILED",
+          "is_again_limit": 0,
+          "market_type": "HS"
+        },
+        {
+          "code": "002300",
+          "is_new": 0,
+          "name": "太阳电缆",
+          "high_days_value": null,
+          "market_id": 33,
+          "change_tag": "FIRST_LIMIT",
+          "is_again_limit": 0,
+          "market_type": "HS"
+        },
+        {
+          "code": "603248",
+          "is_new": 0,
+          "name": "锡华科技",
+          "high_days_value": null,
+          "market_id": 17,
+          "change_tag": "LIMIT_BACK",
+          "is_again_limit": 1,
+          "market_type": "HS"
+        }
+      ],
+      "limit_up_count": {
+        "today": {
+          "num": 77,
+          "history_num": 102,
+          "rate": 0.7549019607843137,
+          "open_num": 25
+        },
+        "yesterday": {
+          "num": 47,
+          "history_num": 67,
+          "rate": 0.7014925373134329,
+          "open_num": 20
+        }
+      },
+      "limit_down_count": {
+        "today": {
+          "num": 0,
+          "history_num": 0,
+          "rate": null,
+          "open_num": 0
+        },
+        "yesterday": {
+          "num": 1,
+          "history_num": 6,
+          "rate": 0.16666666666666666,
+          "open_num": 5
+        }
+      },
+      "date": "20260918",
+      "msg": null,
+      "trade_status": {
+        "id": "non_trading_day",
+        "name": "非交易日",
+        "start_time": "00:00",
+        "end_time": "23:59:59.999"
+      }
+    }
+  },
+  {
+    "url": "https://data.10jqka.com.cn/dataapi/limit_up/get_calendar?filter=HS,GEM2STAR&stock=600630",
+    "status": 404,
+    "status_code": 404,
+    "status_msg": "url不存在",
+    "data": null
+  },
+  {
+    "url": "https://data.10jqka.com.cn/dataapi/limit_up/history?filter=HS,GEM2STAR&code=600630",
+    "status": 404,
+    "status_code": 404,
+    "status_msg": "url不存在",
+    "data": null
+  },
+  {
+    "url": "https://data.10jqka.com.cn/dataapi/limit_up/limit_list?filter=HS,GEM2STAR&code=600630",
+    "status": 404,
+    "status_code": 404,
+    "status_msg": "url不存在",
+    "data": null
+  },
+  {
+    "url": "https://data.10jqka.com.cn/dataapi/limit_up/stock_limit_up?filter=HS,GEM2STAR&code=600630",
+    "status": 404,
+    "status_code": 404,
+    "status_msg": "url不存在",
+    "data": null
+  },
+  {
+    "url": "https://data.10jqka.com.cn/dataapi/limit_up/gene?code=600630",
+    "status": 404,
+    "status_code": 404,
+    "status_msg": "url不存在",
+    "data": null
+  },
+  {
+    "url": "https://data.10jqka.com.cn/dataapi/limit_up/radar?code=600630",
+    "status": 404,
+    "status_code": 404,
+    "status_msg": "url不存在",
+    "data": null
+  },
+  {
+    "url": "https://data.10jqka.com.cn/dataapi/limit_up/get_stock_info?code=600630",
+    "status": 404,
+    "status_code": 404,
+    "status_msg": "url不存在",
+    "data": null
+  }
+]

@@ -1,0 +1,179 @@
+[
+  {
+    "url": "https://data.10jqka.com.cn/public/index.php",
+    "status": 404,
+    "error": null
+  },
+  {
+    "url": "https://dq.10jqka.com.cn/fuyao/limit_up_ladder_service/stock_limit_up/limit_up_radar/v1/get_limit_up_radar?stock_code=600630",
+    "status": 404,
+    "error": null,
+    "keys": [
+      "status_msg",
+      "status_code"
+    ]
+  },
+  {
+    "url": "https://eq.10jqka.com.cn/open/api/limit_up_ladder/v1/stock_limit_up_radar?code=600630",
+    "status": 502,
+    "error": null
+  },
+  {
+    "url": "https://data.10jqka.com.cn/dataapi/limit_up/limit_up_radar?code=600630",
+    "status": 404,
+    "error": null,
+    "keys": [
+      "status_code",
+      "status_msg"
+    ]
+  },
+  {
+    "url": "https://data.10jqka.com.cn/dataapi/limit_up/getStockLimitUp?code=600630",
+    "status": 404,
+    "error": null,
+    "keys": [
+      "status_code",
+      "status_msg"
+    ]
+  },
+  {
+    "url": "https://dq.10jqka.com.cn/fuyao/stock_limit_up_service/stock_limit_up/radar/v1/get?stock_code=600630",
+    "status": 404,
+    "error": null,
+    "keys": [
+      "status_msg",
+      "status_code"
+    ]
+  },
+  {
+    "url": "https://push2ex.eastmoney.com/getTopicZTPool",
+    "status": 200,
+    "error": null,
+    "keys": [
+      "rc",
+      "rt",
+      "svr",
+      "lt",
+      "full",
+      "data"
+    ],
+    "data_keys": [
+      "tc",
+      "qdate",
+      "pool"
+    ],
+    "hit": {
+      "c": "600630",
+      "m": 1,
+      "n": "龙头股份",
+      "p": 8290,
+      "zdp": 9.94694995880127,
+      "amount": 327029680,
+      "ltsz": 3522102639.1299996,
+      "tshare": 3522102663.9999995,
+      "hs": 9.330074310302734,
+      "lbc": 2,
+      "fbt": 93023,
+      "lbt": 93411,
+      "fund": 84059820,
+      "zbc": 1,
+      "hybk": "服装家纺",
+      "zttj": {
+        "days": 2,
+        "ct": 2
+      }
+    }
+  },
+  {
+    "url": "https://push2ex.eastmoney.com/getTopicZTPool",
+    "status": 200,
+    "error": null,
+    "keys": [
+      "rc",
+      "rt",
+      "svr",
+      "lt",
+      "full",
+      "data"
+    ],
+    "data_keys": [
+      "tc",
+      "qdate",
+      "pool"
+    ],
+    "hit": {
+      "c": "600630",
+      "m": 1,
+      "n": "龙头股份",
+      "p": 8290,
+      "zdp": 9.94694995880127,
+      "amount": 327029680,
+      "ltsz": 3522102639.1299996,
+      "tshare": 3522102663.9999995,
+      "hs": 9.330074310302734,
+      "lbc": 2,
+      "fbt": 93023,
+      "lbt": 93411,
+      "fund": 84059820,
+      "zbc": 1,
+      "hybk": "服装家纺",
+      "zttj": {
+        "days": 2,
+        "ct": 2
+      }
+    }
+  },
+  {
+    "url": "https://datacenter-web.eastmoney.com/api/data/v1/get",
+    "status": 200,
+    "error": null,
+    "keys": [
+      "version",
+      "result",
+      "success",
+      "message",
+      "code"
+    ]
+  },
+  {
+    "url": "https://datacenter-web.eastmoney.com/api/data/v1/get",
+    "status": 200,
+    "error": null,
+    "keys": [
+      "version",
+      "result",
+      "success",
+      "message",
+      "code"
+    ]
+  },
+  {
+    "url": "https://datacenter-web.eastmoney.com/api/data/v1/get",
+    "status": 200,
+    "error": null,
+    "keys": [
+      "version",
+      "result",
+      "success",
+      "message",
+      "code"
+    ]
+  },
+  {
+    "url": "https://datacenter-web.eastmoney.com/api/data/v1/get",
+    "status": 200,
+    "error": null,
+    "keys": [
+      "version",
+      "result",
+      "success",
+      "message",
+      "code"
+    ]
+  },
+  {
+    "url": "https://push2.eastmoney.com/api/qt/ulist.np/get",
+    "status": null,
+    "error": "Server disconnected without sending a response."
+  }
+]

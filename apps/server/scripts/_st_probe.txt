@@ -1,0 +1,41 @@
+{
+  "sh_n": 114,
+  "sh_sample": [
+    {
+      "code": "600053",
+      "name": "*ST九鼎"
+    },
+    {
+      "code": "600070",
+      "name": "*ST富润"
+    },
+    {
+      "code": "600077",
+      "name": "*ST宋都"
+    },
+    {
+      "code": "600079",
+      "name": "ST人福"
+    },
+    {
+      "code": "600080",
+      "name": "ST金花"
+    },
+    {
+      "code": "600082",
+      "name": "ST海泰"
+    },
+    {
+      "code": "600083",
+      "name": "*ST博信"
+    },
+    {
+      "code": "600084",
+      "name": "*ST尼雅"
+    }
+  ],
+  "links": [
+    "/stock/shwarn.shtml",
+    "shwarn.shtml"
+  ]
+}
