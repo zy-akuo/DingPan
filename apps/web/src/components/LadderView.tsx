@@ -1,6 +1,7 @@
 import { SearchOutlined, UnorderedListOutlined } from "@ant-design/icons";
-import { Input } from "antd";
+import { Input, Select, Space } from "antd";
 import { useMemo, useState } from "react";
+import { collectRegions } from "./MonitorFilterBar";
 import { matchNameOrInitials } from "../lib/stockMatch";
 import type { LadderGroup, StockItem } from "../types";
 import { formatPct } from "../types";
@@ -24,21 +25,30 @@ export function LadderView({
 }) {
   const [chartStock, setChartStock] = useState<StockItem | null>(null);
   const [keyword, setKeyword] = useState("");
+  const [region, setRegion] = useState("");
+
+  const regions = useMemo(
+    () => collectRegions(groups.flatMap((g) => g.stocks)),
+    [groups],
+  );
 
   const hitCodes = useMemo(() => {
     const q = keyword.trim();
-    if (!q) return null as Set<string> | null;
+    const r = region.trim();
+    if (!q && !r) return null as Set<string> | null;
     const set = new Set<string>();
     for (const g of groups) {
       for (const s of g.stocks) {
-        if (matchNameOrInitials(s.name || "", q)) set.add(s.code);
+        if (q && !matchNameOrInitials(s.name || "", q)) continue;
+        if (r && !(s.region || "").includes(r)) continue;
+        set.add(s.code);
       }
     }
     return set;
-  }, [groups, keyword]);
+  }, [groups, keyword, region]);
 
   const hitCount = hitCodes?.size ?? 0;
-  const searching = !!keyword.trim();
+  const searching = !!(keyword.trim() || region.trim());
 
   return (
     <div className="ladder">
@@ -51,6 +61,19 @@ export function LadderView({
           onChange={(e) => setKeyword(e.target.value)}
           style={{ maxWidth: 320 }}
         />
+        <Space size={4} className="filter-item">
+          <span className="filter-label">地域</span>
+          <Select
+            allowClear
+            showSearch
+            placeholder="全部"
+            value={region || undefined}
+            onChange={(v) => setRegion(v || "")}
+            options={regions.map((r) => ({ label: r, value: r }))}
+            style={{ width: 120 }}
+            optionFilterProp="label"
+          />
+        </Space>
         {searching && (
           <span className="filter-count">
             高亮 {hitCount} 只
