@@ -1,5 +1,5 @@
 import { SearchOutlined, UnorderedListOutlined } from "@ant-design/icons";
-import { Input, Select, Space } from "antd";
+import { Input, Segmented, Select, Space } from "antd";
 import { useMemo, useState } from "react";
 import { collectRegions } from "./MonitorFilterBar";
 import { matchNameOrInitials } from "../lib/stockMatch";
@@ -7,6 +7,20 @@ import type { LadderGroup, StockItem } from "../types";
 import { formatPct } from "../types";
 import { RiskBadge } from "./RiskPanel";
 import { StockChartModal } from "./StockChartModal";
+
+type DisplayMode = "all" | "success" | "success_broken";
+
+const DISPLAY_OPTIONS: { label: string; value: DisplayMode }[] = [
+  { label: "全部展示", value: "all" },
+  { label: "晋级成功", value: "success" },
+  { label: "晋级成功和炸板", value: "success_broken" },
+];
+
+function matchDisplayMode(status: string, mode: DisplayMode): boolean {
+  if (mode === "all") return true;
+  if (mode === "success") return status === "成";
+  return status === "成" || status === "炸";
+}
 
 function StatusBadge({ status }: { status: string }) {
   if (status === "成") return <span className="badge badge-ok">成</span>;
@@ -26,6 +40,16 @@ export function LadderView({
   const [chartStock, setChartStock] = useState<StockItem | null>(null);
   const [keyword, setKeyword] = useState("");
   const [region, setRegion] = useState("");
+  const [displayMode, setDisplayMode] = useState<DisplayMode>("all");
+
+  const visibleGroups = useMemo(
+    () =>
+      groups.map((g) => ({
+        ...g,
+        stocks: g.stocks.filter((s) => matchDisplayMode(s.status, displayMode)),
+      })),
+    [groups, displayMode],
+  );
 
   const regions = useMemo(
     () => collectRegions(groups.flatMap((g) => g.stocks)),
@@ -37,7 +61,7 @@ export function LadderView({
     const r = region.trim();
     if (!q && !r) return null as Set<string> | null;
     const set = new Set<string>();
-    for (const g of groups) {
+    for (const g of visibleGroups) {
       for (const s of g.stocks) {
         if (q && !matchNameOrInitials(s.name || "", q)) continue;
         if (r && !(s.region || "").includes(r)) continue;
@@ -45,7 +69,7 @@ export function LadderView({
       }
     }
     return set;
-  }, [groups, keyword, region]);
+  }, [visibleGroups, keyword, region]);
 
   const hitCount = hitCodes?.size ?? 0;
   const searching = !!(keyword.trim() || region.trim());
@@ -74,6 +98,15 @@ export function LadderView({
             optionFilterProp="label"
           />
         </Space>
+        <Space size={4} className="filter-item">
+          <span className="filter-label">展示</span>
+          <Segmented
+            size="small"
+            value={displayMode}
+            onChange={(v) => setDisplayMode(v as DisplayMode)}
+            options={DISPLAY_OPTIONS}
+          />
+        </Space>
         {searching && (
           <span className="filter-count">
             高亮 {hitCount} 只
@@ -87,7 +120,7 @@ export function LadderView({
           <div>晋级率</div>
           <div>股票</div>
         </div>
-        {groups.map((g) => (
+        {visibleGroups.map((g) => (
           <div key={g.key} className="ladder-row">
             <div className="ladder-progress">{g.label}</div>
             <div className="ladder-rate">{g.promotion_rate}</div>
