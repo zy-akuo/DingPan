@@ -107,6 +107,22 @@ export function SettingsDrawer({
       </div>
 
       <div className="settings-block">
+        <h4>连板天梯</h4>
+        <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+          <Space>
+            <span>展示封板/炸板时间</span>
+            <Switch
+              checked={draft.ladder_show_times !== false}
+              onChange={(v) => setDraft({ ...draft, ladder_show_times: v })}
+            />
+          </Space>
+          <div style={{ color: "var(--muted)", fontSize: 12, lineHeight: 1.5 }}>
+            开启后在晋级成功标的下方显示首封/回封时间，炸板标的显示炸板时间。
+          </div>
+        </Space>
+      </div>
+
+      <div className="settings-block">
         <h4>语音播报</h4>
         <Space direction="vertical" size="middle" style={{ width: "100%" }}>
           <Space>

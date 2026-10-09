@@ -57,6 +57,7 @@ const defaultFields: FieldConfig = {
   speech_types: ["zt", "lb", "zb"],
   poll_interval_sec: 2.5,
   speed_poll_interval_sec: 1.5,
+  ladder_show_times: true,
 };
 
 type MainTab = "monitor" | "ladder" | "watch" | "speed" | "history" | "risk";
@@ -303,6 +304,7 @@ export default function App() {
               dateLabel={dateLabel || "—"}
               groups={snapshot.ladder}
               onOpenDetail={openDetailFromLadder}
+              showTimes={fields.ladder_show_times !== false}
             />
           </section>
         ) : mainTab === "watch" ? (

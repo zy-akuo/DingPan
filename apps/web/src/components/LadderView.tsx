@@ -143,10 +143,13 @@ export function LadderView({
   dateLabel,
   groups,
   onOpenDetail,
+  showTimes = true,
 }: {
   dateLabel: string;
   groups: LadderGroup[];
   onOpenDetail?: (stock: StockItem) => void;
+  /** 是否展示封板/回封/炸板时间行 */
+  showTimes?: boolean;
 }) {
   const [chartStock, setChartStock] = useState<StockItem | null>(null);
   const [keyword, setKeyword] = useState("");
@@ -324,7 +327,7 @@ export function LadderView({
                         </button>
                       ) : null}
                     </div>
-                    <StockTimeLine stock={s} />
+                    {showTimes ? <StockTimeLine stock={s} /> : null}
                   </div>
                 );
               })}

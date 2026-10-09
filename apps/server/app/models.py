@@ -134,6 +134,8 @@ class FieldConfig(BaseModel):
     poll_interval_sec: float = 2.5
     # 涨速榜刷新间隔（秒），范围 0.5~10
     speed_poll_interval_sec: float = 1.5
+    # 连板天梯是否展示封板/回封/炸板时间
+    ladder_show_times: bool = True
 
 
 AVAILABLE_FIELDS: dict[str, str] = {
