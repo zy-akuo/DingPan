@@ -900,25 +900,66 @@ body {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   column-gap: 14px;
-  row-gap: 6px;
+  row-gap: 8px;
   padding: 8px 12px;
   align-content: start;
 }
 
 .ladder-stock {
   font-size: 13px;
-  line-height: 1.55;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  line-height: 1.45;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 1px;
+  min-width: 0;
+  border-radius: 4px;
+  padding: 2px 4px;
+  margin: -1px -4px;
+  transition: background 0.15s ease, opacity 0.15s ease;
+}
+
+.ladder-stock-main {
   display: flex;
   align-items: center;
   gap: 3px;
   min-width: 0;
-  border-radius: 4px;
-  padding: 1px 4px;
-  margin: -1px -4px;
-  transition: background 0.15s ease, opacity 0.15s ease;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ladder-stock-times {
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 0;
+  padding-left: 18px;
+  font-size: 11px;
+  line-height: 1.35;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--muted);
+}
+
+.ladder-stock-times .t-seal {
+  color: color-mix(in srgb, var(--up) 72%, var(--muted));
+}
+
+.ladder-stock-times .t-reseal {
+  color: color-mix(in srgb, var(--accent) 85%, var(--muted));
+}
+
+.ladder-stock-times .t-break {
+  color: color-mix(in srgb, var(--broken) 90%, var(--muted));
+}
+
+.ladder-stock-times .t-sep {
+  color: var(--muted);
+  opacity: 0.7;
 }
 
 .ladder-stock.ladder-stock-hit {
@@ -929,6 +970,12 @@ body {
 .ladder-stock.ladder-stock-hit .nm-link {
   color: var(--accent);
   font-weight: 700;
+}
+
+.ladder-stock.ladder-stock-hit .ladder-stock-times .t-seal,
+.ladder-stock.ladder-stock-hit .ladder-stock-times .t-reseal,
+.ladder-stock.ladder-stock-hit .ladder-stock-times .t-break {
+  font-weight: 600;
 }
 
 .ladder-stock.ladder-stock-dim {

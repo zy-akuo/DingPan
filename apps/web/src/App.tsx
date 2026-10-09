@@ -154,23 +154,14 @@ export default function App() {
     }
   }, []);
 
-  const jumpToMonitor = useCallback(
+  const openDetailFromLadder = useCallback(
     (stock: StockItem) => {
-      const tab = findPoolTab(snapshot, stock.code, stock.status);
-      setPoolTab(tab);
-      setMainTab("monitor");
-      setSelectedCode(stock.code);
-      setFilter(EMPTY_FILTER);
-
-      const pool =
-        tab === "lb"
-          ? snapshot.lb
-          : tab === "zb"
-            ? snapshot.zb
-            : tab === "dt"
-              ? snapshot.dt
-              : snapshot.zt;
-      const hit = pool.find((s) => s.code === stock.code) || stock;
+      const hit =
+        snapshot.zb.find((s) => s.code === stock.code) ||
+        snapshot.lb.find((s) => s.code === stock.code) ||
+        snapshot.dt.find((s) => s.code === stock.code) ||
+        snapshot.zt.find((s) => s.code === stock.code) ||
+        stock;
       void openDetail(hit);
     },
     [snapshot, openDetail],
@@ -311,7 +302,7 @@ export default function App() {
             <LadderView
               dateLabel={dateLabel || "—"}
               groups={snapshot.ladder}
-              onJumpToMonitor={jumpToMonitor}
+              onOpenDetail={openDetailFromLadder}
             />
           </section>
         ) : mainTab === "watch" ? (
