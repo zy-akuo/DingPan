@@ -14,6 +14,8 @@ export interface StockItem {
   seal_amount: number;
   first_seal_time: string;
   last_seal_time: string;
+  /** 炸板时间（炸板标的） */
+  break_time?: string;
   board_count: number;
   open_times: number;
   industry: string;

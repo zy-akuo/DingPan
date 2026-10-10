@@ -58,9 +58,9 @@ function timeShort(t?: string): string {
   return t;
 }
 
-/** 炸板时间：优先末封/炸板时刻，否则首封 */
+/** 炸板时间：只用专用字段，禁止回退到首封（东财炸板池 fbt 是首封不是炸板） */
 function breakTimeOf(s: StockItem): string {
-  return s.last_seal_time || s.first_seal_time || "";
+  return (s.break_time || "").trim();
 }
 
 function StatusBadge({ status }: { status: string }) {
@@ -91,11 +91,14 @@ function StockTimeLine({ stock }: { stock: StockItem }) {
     );
   }
   if (stock.status === "炸") {
+    const first = timeShort(stock.first_seal_time);
     const bt = timeShort(breakTimeOf(stock));
-    if (!bt) return null;
+    if (!first && !bt) return null;
     return (
-      <div className="ladder-stock-times" title="炸板时间">
-        <span className="t-break">炸：{bt}</span>
+      <div className="ladder-stock-times" title="首次封板 / 炸板时间">
+        {first ? <span className="t-seal">首：{first}</span> : null}
+        {first && bt ? <span className="t-sep">；</span> : null}
+        {bt ? <span className="t-break">炸：{bt}</span> : null}
       </div>
     );
   }

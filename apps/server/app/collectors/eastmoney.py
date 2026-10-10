@@ -125,6 +125,8 @@ def normalize_pool_row(row: dict[str, Any], pool: str = "zt") -> dict[str, Any]:
         "seal_amount": float(row.get("fund") or row.get("seal_amount") or 0),
         "first_seal_time": _fmt_time(row.get("fbt") or row.get("first_zt_time")),
         "last_seal_time": _fmt_time(row.get("lbt") or row.get("last_zt_time")),
+        # 炸板池有涨停价 ztp（÷1000）；涨停池无此字段
+        "limit_price": _price(row.get("ztp")) if row.get("ztp") not in (None, "") else 0.0,
         "board_count": board,
         "open_times": open_times,
         "industry": industry,
@@ -607,11 +609,11 @@ class EastMoneyClient:
                 except (TypeError, ValueError):
                     continue
                 try:
-                    cum_vol = float(parts[2] or 0)  # 手（累计）
+                    cum_vol = float(parts[2] or 0) if len(parts) > 2 else prev_vol  # 手（累计）
                 except (TypeError, ValueError):
                     cum_vol = prev_vol
                 try:
-                    cum_amt = float(parts[3] or 0)
+                    cum_amt = float(parts[3] or 0) if len(parts) > 3 else 0.0
                 except (TypeError, ValueError):
                     cum_amt = 0.0
                 vol_hands = max(0.0, cum_vol - prev_vol)

@@ -192,8 +192,15 @@ export default function App() {
     }
   }, []);
 
+  const firstBoard = useMemo(
+    () => snapshot.zt.filter((s) => (s.board_count || 1) <= 1),
+    [snapshot.zt],
+  );
+
   const poolData = useMemo(() => {
     switch (poolTab) {
+      case "sb":
+        return firstBoard;
       case "lb":
         return snapshot.lb;
       case "zb":
@@ -203,7 +210,7 @@ export default function App() {
       default:
         return snapshot.zt;
     }
-  }, [poolTab, snapshot]);
+  }, [poolTab, snapshot, firstBoard]);
 
   const filteredData = useMemo(
     () => applyMonitorFilter(poolData, filter),
@@ -278,6 +285,7 @@ export default function App() {
               }}
               items={[
                 { key: "zt", label: `涨停(${snapshot.summary.zt_today})` },
+                { key: "sb", label: `首板(${firstBoard.length})` },
                 { key: "lb", label: `连板(${snapshot.summary.lb_today})` },
                 { key: "zb", label: `炸板(${snapshot.summary.zb_today})` },
                 { key: "dt", label: `跌停(${snapshot.summary.dt_today})` },

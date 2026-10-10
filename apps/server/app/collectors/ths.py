@@ -125,6 +125,54 @@ class ThsClient:
         payload = data.get("data") or {}
         return list(payload.get("info") or [])
 
+    async def fetch_open_limit_pool(self, date: str | None = None) -> list[dict[str, Any]]:
+        """打开涨停/炸板池。last_limit_up_time 为炸板时刻（unix 秒）。"""
+        params: dict[str, Any] = {
+            "filter": "HS,GEM2STAR",
+            "order_field": "first_limit_up_time",
+            "order_type": "0",
+            "limit": "200",
+            "page": "1",
+            "field": (
+                "code,name,change_rate,latest,first_limit_up_time,last_limit_up_time,"
+                "open_num,change_tag,is_again_limit,currency_value,reason_type"
+            ),
+        }
+        if date:
+            params["date"] = date.replace("-", "")
+        try:
+            data = await self._get(
+                "https://data.10jqka.com.cn/dataapi/limit_up/open_limit_pool",
+                params,
+            )
+        except Exception:
+            return []
+        if data.get("status_code") not in (0, "0", None):
+            return []
+        payload = data.get("data") or {}
+        return list(payload.get("info") or [])
+
+
+def ths_ts_to_hms(raw: Any) -> str:
+    """同花顺封板/炸板时间：unix 秒 → HH:MM:SS。"""
+    if raw is None or raw == "":
+        return ""
+    try:
+        n = int(float(str(raw).strip()))
+    except (TypeError, ValueError):
+        s = str(raw).strip()
+        if ":" in s:
+            return s if len(s) >= 5 else ""
+        return ""
+    if n <= 0:
+        return ""
+    if n > 10_000_000_000:
+        n //= 1000
+    try:
+        return datetime.fromtimestamp(n).strftime("%H:%M:%S")
+    except (OSError, OverflowError, ValueError):
+        return ""
+
 
 def _limit_threshold(code: str) -> float:
     if code.startswith(("300", "301", "688")):

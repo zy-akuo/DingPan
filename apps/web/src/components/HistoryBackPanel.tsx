@@ -183,41 +183,50 @@ export function HistoryBackPanel({
     [date, onDateChange],
   );
 
-  const load = useCallback(async (ds: string) => {
-    const seq = ++reqSeq.current;
-    setLoading(true);
-    setActiveConcept(null);
-    try {
-      const res = await fetch(`/api/market/history?date=${encodeURIComponent(ds)}`);
-      if (seq !== reqSeq.current) return;
-      if (!res.ok) {
+  const load = useCallback(
+    async (ds: string) => {
+      const seq = ++reqSeq.current;
+      setLoading(true);
+      setActiveConcept(null);
+      try {
+        const res = await fetch(`/api/market/history?date=${encodeURIComponent(ds)}`);
+        if (seq !== reqSeq.current) return;
+        if (!res.ok) {
+          setData({
+            date: ds,
+            count: 0,
+            items: [],
+            concept_groups: [],
+            board_groups: [],
+            error: `加载失败(${res.status})`,
+          });
+          return;
+        }
+        const payload = (await res.json()) as HistorySnapshot;
+        if (seq !== reqSeq.current) return;
+        // 后端可能把周末/未入库日纠正为最近交易日（开盘啦实时源）
+        const actual = normalizeYmd(payload.date, ds);
+        setData({ ...payload, date: actual });
+        if (actual !== ds) {
+          writeStoredDate(actual);
+          onDateChange(actual);
+        }
+      } catch (e) {
+        if (seq !== reqSeq.current) return;
         setData({
           date: ds,
           count: 0,
           items: [],
           concept_groups: [],
           board_groups: [],
-          error: `加载失败(${res.status})`,
+          error: e instanceof Error ? e.message : "网络错误",
         });
-        return;
+      } finally {
+        if (seq === reqSeq.current) setLoading(false);
       }
-      const payload = (await res.json()) as HistorySnapshot;
-      if (seq !== reqSeq.current) return;
-      setData({ ...payload, date: ds });
-    } catch (e) {
-      if (seq !== reqSeq.current) return;
-      setData({
-        date: ds,
-        count: 0,
-        items: [],
-        concept_groups: [],
-        board_groups: [],
-        error: e instanceof Error ? e.message : "网络错误",
-      });
-    } finally {
-      if (seq === reqSeq.current) setLoading(false);
-    }
-  }, []);
+    },
+    [onDateChange],
+  );
 
   useEffect(() => {
     void load(date);
@@ -409,7 +418,9 @@ export function HistoryBackPanel({
             涨停 <em className="up">{ztCount}</em>
           </span>
           <span className="muted">{dateLabel}</span>
-          <span className="muted">开盘啦</span>
+          <span className="muted" title="开盘啦个股/板块复盘约 15:05 更新，龙虎榜约 17:00">
+            开盘啦
+          </span>
         </div>
         <div className="history-stock-search">
           <Input

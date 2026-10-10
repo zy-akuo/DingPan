@@ -139,24 +139,54 @@ class KaipanlaClient:
         resp.raise_for_status()
         return resp.json()
 
-    async def fetch_board_level(self, date: str, pid_type: int) -> list[dict[str, Any]]:
-        """PidType: 1=首板, 2=2连板, ..."""
+    @staticmethod
+    def _is_recent_calendar_date(date: str, within_days: int = 4) -> bool:
+        """近期日历日：历史库可能尚未入库，需尝试实时接口。"""
         day = _day_label(date)
         try:
-            raw = await self._post(
-                self.HIST_URL,
-                "apphis.longhuvip.com",
-                {
-                    "a": "DailyLimitPerformance",
-                    "c": "HisHomeDingPan",
-                    "Order": "0",
-                    "st": "2000",
-                    "Index": "0",
-                    "PidType": str(pid_type),
-                    "Type": "4",
-                    "Day": day,
-                },
-            )
+            d = datetime.strptime(day, "%Y-%m-%d").date()
+        except ValueError:
+            return True
+        return abs((datetime.now().date() - d).days) <= within_days
+
+    async def fetch_board_level(
+        self,
+        date: str,
+        pid_type: int,
+        *,
+        source: str = "hist",
+    ) -> list[dict[str, Any]]:
+        """PidType: 1=首板, 2=2连板, ...
+
+        source=hist → 历史库 HisHomeDingPan（按日准确，当日盘后可能尚未入库）
+        source=live → 实时库 HomeDingPan（约 15:05 起有当日复盘，Day 参数无效、始终最新交易日）
+        """
+        day = _day_label(date)
+        if source == "live":
+            url, host, ctrl = self.LIVE_URL, "apphwhq.longhuvip.com", "HomeDingPan"
+            payload = {
+                "a": "DailyLimitPerformance",
+                "c": ctrl,
+                "Order": "0",
+                "st": "2000",
+                "Index": "0",
+                "PidType": str(pid_type),
+                "Type": "4",
+            }
+        else:
+            url, host, ctrl = self.HIST_URL, "apphis.longhuvip.com", "HisHomeDingPan"
+            payload = {
+                "a": "DailyLimitPerformance",
+                "c": ctrl,
+                "Order": "0",
+                "st": "2000",
+                "Index": "0",
+                "PidType": str(pid_type),
+                "Type": "4",
+                "Day": day,
+            }
+        try:
+            raw = await self._post(url, host, payload)
         except Exception:
             return []
         if str(raw.get("errcode")) not in ("0", "0.0"):
@@ -172,11 +202,17 @@ class KaipanlaClient:
                 out.append(parsed)
         return out
 
-    async def fetch_limit_ladder(self, date: str, max_board: int = 12) -> dict[str, Any]:
-        """Fetch all board levels for a day. Returns ladder + flat items + concept groups."""
+    async def _assemble_limit_ladder(
+        self,
+        date: str,
+        max_board: int,
+        source: str,
+    ) -> dict[str, Any]:
         day = _day_label(date)
-        # Probe high boards first; stop after a few empty high levels
-        tasks = [self.fetch_board_level(day, pid) for pid in range(1, max_board + 1)]
+        tasks = [
+            self.fetch_board_level(day, pid, source=source)
+            for pid in range(1, max_board + 1)
+        ]
         results = await asyncio.gather(*tasks)
 
         ladder: dict[int, list[dict[str, Any]]] = {}
@@ -187,7 +223,6 @@ class KaipanlaClient:
             if not rows:
                 empty_streak += 1
                 if pid >= 4 and empty_streak >= 2:
-                    # no need to keep higher empty levels in payload
                     break
                 continue
             empty_streak = 0
@@ -198,7 +233,6 @@ class KaipanlaClient:
                 seen.add(r["code"])
                 items.append(r)
 
-        # concept aggregation (matches 开盘啦概念分类)
         concept_map: dict[str, list[dict[str, Any]]] = {}
         for s in items:
             key = (s.get("reason") or s.get("industry") or "其他").strip() or "其他"
@@ -244,22 +278,38 @@ class KaipanlaClient:
                 }
             )
 
+        # 情绪统计仅历史库有；实时源时仍尽量按日取 hist
         expr = await self.fetch_expression(day)
         zt_count = len(items)
-        dt_count = int(expr.get("dt_count") or 0)
 
         return {
             "date": day.replace("-", ""),
             "date_label": day,
             "count": zt_count,
             "zt_count": zt_count,
-            "dt_count": dt_count,
+            "dt_count": int(expr.get("dt_count") or 0),
             "expression": expr,
             "items": items,
             "board_groups": board_groups,
             "concept_groups": concept_groups,
-            "source": "kaipanla",
+            "source": "kaipanla_live" if source == "live" else "kaipanla",
         }
+
+    async def fetch_limit_ladder(self, date: str, max_board: int = 12) -> dict[str, Any]:
+        """Fetch all board levels for a day. Returns ladder + flat items + concept groups.
+
+        开盘啦官方：个股/板块复盘约 15:05 更新。历史库 HisHomeDingPan 当日常延后入库
+        （周末/节假请求日历日会 err）；近期日期历史为空时回退实时 HomeDingPan。
+        注意：实时接口忽略 Day，始终返回最新交易日，仅可在近期日期上作为回退。
+        """
+        hist = await self._assemble_limit_ladder(date, max_board, "hist")
+        if int(hist.get("count") or 0) > 0:
+            return hist
+        if self._is_recent_calendar_date(date):
+            live = await self._assemble_limit_ladder(date, max_board, "live")
+            if int(live.get("count") or 0) > 0:
+                return live
+        return hist
 
     async def fetch_expression(self, date: str) -> dict[str, Any]:
         day = _day_label(date)

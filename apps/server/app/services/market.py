@@ -42,6 +42,16 @@ def _is_trading_time(now: datetime | None = None) -> bool:
     return (time(9, 15) <= t <= time(11, 35)) or (time(12, 55) <= t <= time(15, 5))
 
 
+def _pool_fingerprint(zt: list[dict[str, Any]], zb: list[dict[str, Any]]) -> tuple[Any, ...]:
+    """Identify whether two calendar dates returned the same trading-day payload."""
+    return (
+        len(zt),
+        len(zb),
+        tuple(sorted(str(r.get("code") or "") for r in zt)),
+        tuple(sorted(str(r.get("code") or "") for r in zb)),
+    )
+
+
 def _board_tag(board: int, open_times: int) -> str:
     if board <= 1:
         base = "首板"
@@ -165,29 +175,91 @@ class MarketService:
         for q in dead:
             self.unsubscribe(q)
 
-    async def warmup_yesterday(self) -> None:
+    async def _fetch_pools(
+        self, ds: str
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+        try:
+            zt_rows, zb_rows, dt_rows = await asyncio.wait_for(
+                asyncio.gather(
+                    self.client.fetch_zt_pool(ds),
+                    self.client.fetch_zb_pool(ds),
+                    self.client.fetch_dt_pool(ds),
+                ),
+                timeout=15,
+            )
+            return list(zt_rows or []), list(zb_rows or []), list(dt_rows or [])
+        except Exception:
+            return [], [], []
+
+    async def _resolve_trade_pools(
+        self,
+    ) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+        """最新真实交易日及其涨停/炸板/跌停池。
+
+        东财在周末/节假常把上一交易日数据挂到日历日上；用相邻日指纹去重，
+        避免 trade_date 显示成不开盘的今天，以及「今=昨」导致天梯错位。
+        """
         from datetime import timedelta
 
-        today = today_yyyymmdd()
-        d = datetime.now().date()
-        for _ in range(15):
-            d = d - timedelta(days=1)
+        probe = datetime.now().date()
+        last: tuple[str, list, list, list, tuple] | None = None
+        for _ in range(16):
+            ds = probe.strftime("%Y%m%d")
+            zt_rows, zb_rows, dt_rows = await self._fetch_pools(ds)
+            if zt_rows or zb_rows or dt_rows:
+                fp = _pool_fingerprint(zt_rows, zb_rows)
+                if last is None:
+                    last = (ds, zt_rows, zb_rows, dt_rows, fp)
+                elif fp == last[4]:
+                    # 与更新的日历日内容相同 → 更新日是镜像，改为更早的真实日
+                    last = (ds, zt_rows, zb_rows, dt_rows, fp)
+                else:
+                    # 更早一日内容不同 → last 即为最新真实交易日
+                    break
+            probe = probe - timedelta(days=1)
+
+        if not last:
+            return today_yyyymmdd(), [], [], []
+        return last[0], last[1], last[2], last[3]
+
+    async def _load_prev_day_pools(
+        self,
+        trade_date: str,
+        trade_zt: list[dict[str, Any]],
+        trade_zb: list[dict[str, Any]],
+    ) -> None:
+        """相对 trade_date 的上一交易日涨停池（供连板天梯晋级/炸板归桶）。"""
+        from datetime import timedelta
+
+        trade_fp = _pool_fingerprint(trade_zt, trade_zb)
+        try:
+            d = datetime.strptime(trade_date, "%Y%m%d").date() - timedelta(days=1)
+        except ValueError:
+            d = datetime.now().date() - timedelta(days=1)
+
+        for _ in range(16):
             ds = d.strftime("%Y%m%d")
-            if ds >= today:
-                continue
-            try:
-                rows = await self.client.fetch_zt_pool(ds)
-                zb = await self.client.fetch_zb_pool(ds)
-                dt = await self.client.fetch_dt_pool(ds)
-            except Exception:
-                continue
-            # skip empty non-trading days
-            if not rows and not zb and not dt:
-                continue
-            self._y_zt = rows
-            self._y_zb_count = len(zb)
-            self._y_dt_count = len(dt)
-            break
+            rows, zb, dt = await self._fetch_pools(ds)
+            if rows or zb or dt:
+                if _pool_fingerprint(rows, zb) == trade_fp:
+                    # 仍是 trade_date 的镜像，继续往前
+                    d = d - timedelta(days=1)
+                    continue
+                self._y_zt = rows
+                self._y_zb_count = len(zb)
+                self._y_dt_count = len(dt)
+                return
+            d = d - timedelta(days=1)
+
+        self._y_zt = []
+        self._y_zb_count = 0
+        self._y_dt_count = 0
+
+    async def warmup_yesterday(self) -> None:
+        """启动时预热：解析最新交易日，并加载其上一交易日。"""
+        date, zt_rows, zb_rows, _dt_rows = await self._resolve_trade_pools()
+        if zt_rows or zb_rows:
+            await self._load_prev_day_pools(date, zt_rows, zb_rows)
 
     def _to_stock(self, row: dict[str, Any], status: StockStatus) -> StockItem:
         board = int(row.get("board_count") or 1)
@@ -214,6 +286,7 @@ class MarketService:
             seal_amount=float(row.get("seal_amount") or 0),
             first_seal_time=row.get("first_seal_time") or "",
             last_seal_time=row.get("last_seal_time") or "",
+            break_time=row.get("break_time") or "",
             board_count=board,
             open_times=open_times,
             industry=row.get("industry") or "",
@@ -645,6 +718,110 @@ class MarketService:
         )
         return groups
 
+    @staticmethod
+    def _infer_break_from_trends(
+        points: list[dict[str, Any]],
+        limit_price: float,
+    ) -> str:
+        """分时推断最终炸板时刻：最后一次离开涨停价的分钟。"""
+        if not points or limit_price <= 0:
+            return ""
+        eps = max(0.01, limit_price * 0.0015)
+        sealed = False
+        last_break = ""
+        for p in points:
+            try:
+                price = float(p.get("price") or 0)
+            except (TypeError, ValueError):
+                continue
+            t = str(p.get("time") or "").strip()
+            if not t:
+                continue
+            if price >= limit_price - eps:
+                sealed = True
+            elif sealed:
+                # 规范为 HH:MM:SS
+                last_break = t if t.count(":") >= 2 else (f"{t}:00" if t.count(":") == 1 else t)
+                sealed = False
+        return last_break
+
+    async def _enrich_zb_break_times(
+        self,
+        zb: list[StockItem],
+        zb_rows: list[dict[str, Any]],
+        trade_date: str,
+    ) -> None:
+        """补齐炸板时间。优先同花顺打开涨停池 last_limit_up_time，缺失再用分时推断。"""
+        if not zb:
+            return
+        from ..collectors.ths import ThsClient, ths_ts_to_hms
+
+        ths_map: dict[str, tuple[str, str]] = {}
+        ths = ThsClient(timeout=8.0)
+        try:
+            rows = await ths.fetch_open_limit_pool(trade_date)
+            for r in rows:
+                code = str(r.get("code") or "").zfill(6)
+                if not code.isdigit():
+                    continue
+                first_t = ths_ts_to_hms(r.get("first_limit_up_time"))
+                break_t = ths_ts_to_hms(r.get("last_limit_up_time"))
+                if break_t:
+                    ths_map[code] = (first_t, break_t)
+        except Exception:
+            ths_map = {}
+        finally:
+            try:
+                await ths.aclose()
+            except Exception:
+                pass
+
+        limit_by_code = {
+            str(r.get("code") or "").zfill(6): float(r.get("limit_price") or 0)
+            for r in zb_rows
+        }
+
+        missing: list[int] = []
+        for i, s in enumerate(zb):
+            hit = ths_map.get(s.code)
+            if hit:
+                first_t, break_t = hit
+                upd: dict[str, Any] = {"break_time": break_t}
+                # 首封以东财为准；东财缺失时用同花顺补
+                if first_t and not (s.first_seal_time or "").strip():
+                    upd["first_seal_time"] = first_t
+                zb[i] = s.model_copy(update=upd)
+            else:
+                missing.append(i)
+
+        if not missing:
+            return
+
+        sem = asyncio.Semaphore(6)
+
+        async def one(idx: int) -> None:
+            s = zb[idx]
+            limit_px = limit_by_code.get(s.code) or 0.0
+            async with sem:
+                try:
+                    tr = await self.client.fetch_trends(s.code)
+                except Exception:
+                    return
+            points = list(tr.get("points") or [])
+            if limit_px <= 0:
+                try:
+                    pre = float(tr.get("pre_close") or 0)
+                except (TypeError, ValueError):
+                    pre = 0.0
+                if pre > 0:
+                    thr = 1.2 if s.code.startswith(("300", "301", "688")) else 1.1
+                    limit_px = round(pre * thr, 2)
+            bt = self._infer_break_from_trends(points, limit_px)
+            if bt:
+                zb[idx] = s.model_copy(update={"break_time": bt})
+
+        await asyncio.gather(*(one(i) for i in missing))
+
     async def _enrich_ladder_fails(self, ladder: list[LadderGroup]) -> list[LadderGroup]:
         fail_codes = [
             s.code
@@ -809,32 +986,8 @@ class MarketService:
 
     async def refresh(self) -> MarketSnapshot:
         async with self._lock:
-            date = today_yyyymmdd()
-            zt_rows: list[dict[str, Any]] = []
-            zb_rows: list[dict[str, Any]] = []
-            dt_rows: list[dict[str, Any]] = []
             try:
-                # 若当日池为空（周末/节假日/接口抖动），回退到最近有数据的交易日
-                from datetime import timedelta
-
-                probe = datetime.now().date()
-                for _ in range(12):
-                    ds = probe.strftime("%Y%m%d")
-                    try:
-                        zt_rows, zb_rows, dt_rows = await asyncio.wait_for(
-                            asyncio.gather(
-                                self.client.fetch_zt_pool(ds),
-                                self.client.fetch_zb_pool(ds),
-                                self.client.fetch_dt_pool(ds),
-                            ),
-                            timeout=15,
-                        )
-                    except Exception:
-                        zt_rows, zb_rows, dt_rows = [], [], []
-                    if zt_rows or zb_rows or dt_rows:
-                        date = ds
-                        break
-                    probe = probe - timedelta(days=1)
+                date, zt_rows, zb_rows, dt_rows = await self._resolve_trade_pools()
             except Exception:
                 return self.snapshot
 
@@ -843,6 +996,12 @@ class MarketService:
                 if self.snapshot.zt or self.snapshot.zb or self.snapshot.dt:
                     return self.snapshot
                 return self.snapshot
+
+            # 昨日池必须相对「真实交易日」，否则周末今=昨会导致炸板全进首板、无晋级失败
+            try:
+                await self._load_prev_day_pools(date, zt_rows, zb_rows)
+            except Exception:
+                pass
 
             zt = [self._to_stock(r, StockStatus.SUCCESS) for r in zt_rows]
             zb = [self._to_stock(r, StockStatus.BROKEN) for r in zb_rows]
@@ -864,9 +1023,21 @@ class MarketService:
             except Exception:
                 pass
 
+            # 炸板时间：东财池仅有首封 fbt，需同花顺打开涨停池 / 分时补齐
+            try:
+                await asyncio.wait_for(
+                    self._enrich_zb_break_times(zb, zb_rows, date),
+                    timeout=10,
+                )
+            except Exception:
+                pass
+
             zt.sort(key=lambda s: (s.first_seal_time or "", s.code), reverse=True)
             lb = [s for s in zt if s.board_count >= 2]
-            zb.sort(key=lambda s: (s.first_seal_time or "", s.code), reverse=True)
+            zb.sort(
+                key=lambda s: (s.break_time or s.first_seal_time or "", s.code),
+                reverse=True,
+            )
 
             y_zt_count = len(self._y_zt)
             y_lb = sum(1 for r in self._y_zt if int(r.get("board_count") or 1) >= 2)
@@ -942,6 +1113,17 @@ class MarketService:
                 await self.refresh()
             except Exception:
                 pass
+
+            # 开盘啦复盘约 15:05 起更新：盘后预热最新交易日历史缓存，缩短用户首次等待
+            try:
+                now = datetime.now()
+                if now.weekday() < 5 and now.time() >= time(15, 5):
+                    ds = (self.snapshot.trade_date or "").strip()
+                    if ds:
+                        await self.get_zt_history(ds)
+            except Exception:
+                pass
+
             try:
                 cfg = load_user_config()
                 user_iv = float(getattr(cfg.fields, "poll_interval_sec", None) or interval_trading)
@@ -1256,13 +1438,35 @@ class MarketService:
         groups.sort(key=lambda g: (-g.count, g.label))
         return groups
 
+    def _history_cache_ttl(self, ds: str, *, empty: bool, is_latest: bool) -> float:
+        """开盘啦复盘：个股/板块约 15:05 更新，龙虎榜约 17:00。
+
+        最新交易日在盘后窗口内用短 TTL，尽快吃到当日数据；历史日长缓存。
+        """
+        if empty:
+            return 45.0
+        if not is_latest:
+            return 6 * 3600
+        now = datetime.now()
+        if now.weekday() < 5:
+            t = now.time()
+            # 收盘后到傍晚：密集刷新，越及时越好
+            if time(15, 0) <= t <= time(18, 30):
+                return 60.0
+            # 盘中也允许较短刷新（实时源已有梯队）
+            if time(9, 15) <= t < time(15, 0):
+                return 120.0
+        return 30 * 60
+
     async def get_zt_history(self, date: str | None, ths_client: Any = None) -> dict[str, Any]:
         """按日期回溯涨停：开盘啦连板梯队 + 概念分类（不再使用东财）。"""
         from ..collectors.kaipanla import KaipanlaClient
-        from .ttl_cache import ttl_cache, trading_ttl
+        from .ttl_cache import ttl_cache
 
-        ds = self._norm_date(date)
-        cache_key = f"history_zt:kpl:v1:{ds}"
+        req_ds = self._norm_date(date)
+        latest_ds = (self.snapshot.trade_date or "").strip() or today_yyyymmdd()
+
+        cache_key = f"history_zt:kpl:v2:{req_ds}"
         cached = await ttl_cache.get(cache_key)
         if (
             cached
@@ -1274,9 +1478,52 @@ class MarketService:
 
         kpl = KaipanlaClient()
         try:
-            raw = await kpl.fetch_limit_ladder(ds)
+            raw = await kpl.fetch_limit_ladder(req_ds)
         finally:
             await kpl.aclose()
+
+        # 实时源忽略 Day、始终最新交易日 → 仅当请求的是「最新附近」才采纳，并纠正日期
+        actual_ds = req_ds
+        if str(raw.get("source") or "") == "kaipanla_live" and int(raw.get("count") or 0) > 0:
+            resolved = latest_ds
+            try:
+                resolved_pools = await self._resolve_trade_pools()
+                if resolved_pools[0]:
+                    resolved = resolved_pools[0]
+                    latest_ds = resolved
+            except Exception:
+                pass
+            today = today_yyyymmdd()
+            # 请求日 ≥ 最新交易日 / 今天：周末点今天、盘后点当日 → 可采纳实时源
+            accept_live = bool(resolved) and (
+                req_ds >= resolved or req_ds >= today or req_ds == latest_ds
+            )
+            if accept_live:
+                actual_ds = resolved
+                raw["date"] = actual_ds
+                raw["date_label"] = (
+                    f"{actual_ds[0:4]}-{actual_ds[4:6]}-{actual_ds[6:8]}"
+                    if len(actual_ds) == 8
+                    else actual_ds
+                )
+            else:
+                # 更早历史日历史库为空时，不能拿实时最新日顶替
+                raw = {
+                    "date": req_ds,
+                    "date_label": (
+                        f"{req_ds[0:4]}-{req_ds[4:6]}-{req_ds[6:8]}"
+                        if len(req_ds) == 8
+                        else req_ds
+                    ),
+                    "count": 0,
+                    "zt_count": 0,
+                    "dt_count": 0,
+                    "expression": {},
+                    "items": [],
+                    "board_groups": [],
+                    "concept_groups": [],
+                    "source": "kaipanla",
+                }
 
         items: list[StockItem] = []
         for row in raw.get("items") or []:
@@ -1344,9 +1591,13 @@ class MarketService:
                 )
             )
 
+        date_label = str(raw.get("date_label") or "")
+        if not date_label and len(actual_ds) == 8:
+            date_label = f"{actual_ds[0:4]}-{actual_ds[4:6]}-{actual_ds[6:8]}"
+
         payload = {
-            "date": ds,
-            "date_label": raw.get("date_label") or ds,
+            "date": actual_ds,
+            "date_label": date_label or actual_ds,
             "count": len(items),
             "zt_count": int(raw.get("zt_count") or len(items)),
             "dt_count": int(raw.get("dt_count") or 0),
@@ -1354,14 +1605,21 @@ class MarketService:
             "items": [s.model_dump() for s in items],
             "concept_groups": [g.model_dump() for g in concept_groups],
             "board_groups": [g.model_dump() for g in board_groups],
-            "source": "kaipanla",
+            "source": str(raw.get("source") or "kaipanla"),
         }
+
+        is_latest = actual_ds == latest_ds or actual_ds == today_yyyymmdd()
+        ttl = self._history_cache_ttl(actual_ds, empty=not items, is_latest=is_latest)
+
+        # 请求日与实际日可能不同（周末点今天 → 回退到最近交易日），双侧写缓存
+        await ttl_cache.set(cache_key, payload, ttl, kind="history_zt")
+        if actual_ds != req_ds:
+            await ttl_cache.set(f"history_zt:kpl:v2:{actual_ds}", payload, ttl, kind="history_zt")
+
         if items:
-            ttl = trading_ttl(45, 3600) if ds == today_yyyymmdd() else 6 * 3600
-            await ttl_cache.set(cache_key, payload, ttl, kind="history_zt")
             try:
                 await upsert_zt_history(
-                    ds,
+                    actual_ds,
                     [
                         {
                             "code": s.code,
@@ -1375,8 +1633,6 @@ class MarketService:
                 )
             except Exception:
                 pass
-        else:
-            await ttl_cache.set(cache_key, payload, 60, kind="history_zt")
         return payload
 
     @staticmethod
@@ -1609,7 +1865,9 @@ class MarketService:
         reason_map: dict[str, str] = {}
         trusted_board: dict[str, int] = {}
         for ds in list(candidates | rejected):
-            hit = await ttl_cache.get(f"history_zt:kpl:v1:{ds}")
+            hit = await ttl_cache.get(f"history_zt:kpl:v2:{ds}")
+            if not hit:
+                hit = await ttl_cache.get(f"history_zt:kpl:v1:{ds}")
             if not isinstance(hit, dict) or int(hit.get("count") or 0) <= 0:
                 continue
             found = None

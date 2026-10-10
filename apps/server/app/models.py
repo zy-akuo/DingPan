@@ -27,6 +27,8 @@ class StockItem(BaseModel):
     seal_amount: float = 0.0
     first_seal_time: str = ""
     last_seal_time: str = ""
+    # 炸板时间（仅炸板标的；东财炸板池无此字段，由同花顺打开涨停池/分时推断补齐）
+    break_time: str = ""
     board_count: int = 1
     open_times: int = 0
     industry: str = ""
