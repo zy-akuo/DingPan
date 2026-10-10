@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 def _default_data_dir() -> Path:
+    # macOS: ~/Library/Application Support/DingPan
+    # Windows: %APPDATA%\DingPan
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "DingPan"
     return Path.home() / "AppData" / "Roaming" / "DingPan"
 
 
