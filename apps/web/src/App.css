@@ -710,6 +710,56 @@ body {
   color: var(--muted);
 }
 
+.radar-method {
+  margin: -4px 0 10px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.gene-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.gene-title-text {
+  min-width: 0;
+}
+
+.gene-lookback-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--card-soft);
+}
+
+.gene-lb-tab {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 5px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.gene-lb-tab:hover {
+  color: var(--text);
+}
+
+.gene-lb-tab.on {
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 22%, var(--card));
+}
+
 .former-names {
   display: flex;
   flex-wrap: wrap;

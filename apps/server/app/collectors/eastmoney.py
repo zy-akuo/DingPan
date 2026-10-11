@@ -260,14 +260,26 @@ class EastMoneyClient:
             page += 1
         return out
 
-    async def fetch_stock_limitup_dates(self, code: str) -> list[dict[str, Any]]:
-        """个股历史涨停日期（东财 RPT_DMSK_LIMITUP，按代码过滤）。
+    async def fetch_stock_limit_events(
+        self,
+        code: str,
+        *,
+        close_up: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """个股触板/涨停事件（东财 RPT_DMSK_LIMITUP）。
 
-        返回按日期降序的 [{trade_date, name, first_seal_time}, ...]。
+        close_up:
+          - \"1\": 收盘封住涨停（对齐同花顺涨停池）
+          - \"0\": 曾触板但未收盘封住
+          - None: 全部触板日
+        返回按日期降序 [{trade_date, name, first_seal_time, sealed}, ...]。
         """
         code = (code or "").zfill(6)
         if not code.isdigit():
             return []
+        filt = f'(SECURITY_CODE="{code}")'
+        if close_up in ("0", "1"):
+            filt += f'(IS_CLOSE_UP="{close_up}")'
         out: list[dict[str, Any]] = []
         page = 1
         page_size = 500
@@ -278,7 +290,7 @@ class EastMoneyClient:
                     {
                         "reportName": "RPT_DMSK_LIMITUP",
                         "columns": "ALL",
-                        "filter": f'(SECURITY_CODE="{code}")(IS_CLOSE_UP="1")',
+                        "filter": filt,
                         "pageNumber": str(page),
                         "pageSize": str(page_size),
                         "sortTypes": "-1",
@@ -298,25 +310,25 @@ class EastMoneyClient:
                 break
             for r in rows:
                 td = str(r.get("TRADE_DATE") or "")
-                # "2024-02-21 00:00:00" -> 20240221
                 raw = td.replace("-", "").replace(" ", "")[:8]
                 if len(raw) != 8 or not raw.isdigit():
                     continue
                 first_t = str(r.get("FIRST_LIMITUP_TIME") or "")
                 if first_t and ":" not in first_t:
                     first_t = _fmt_time(first_t)
+                sealed_flag = str(r.get("IS_CLOSE_UP") or "")
                 out.append(
                     {
                         "trade_date": raw,
                         "name": str(r.get("SECURITY_NAME_ABBR") or code),
                         "first_seal_time": first_t,
+                        "sealed": sealed_flag in ("1", "1.0", "true", "True"),
                     }
                 )
             total = int(result.get("count") or 0)
             if page * page_size >= total or len(rows) < page_size:
                 break
             page += 1
-        # de-dup keep first (newest-first already)
         seen: set[str] = set()
         uniq: list[dict[str, Any]] = []
         for row in out:
@@ -326,6 +338,10 @@ class EastMoneyClient:
             seen.add(ds)
             uniq.append(row)
         return uniq
+
+    async def fetch_stock_limitup_dates(self, code: str) -> list[dict[str, Any]]:
+        """个股历史收盘涨停日期（DMSK IS_CLOSE_UP=1）。"""
+        return await self.fetch_stock_limit_events(code, close_up="1")
 
     async def fetch_zb_pool(self, date: str | None = None) -> list[dict[str, Any]]:
         date = date or today_yyyymmdd()
@@ -936,13 +952,19 @@ class EastMoneyClient:
             return prev_items[-1]
         return today_item or items[-1]
 
-    async def fetch_kline(self, code: str, limit: int = 120) -> dict[str, Any]:
-        """Daily K-line bars (Eastmoney first, Sina/Tencent fallback)."""
+    async def fetch_kline(
+        self, code: str, limit: int = 120, *, fqt: int = 1
+    ) -> dict[str, Any]:
+        """Daily K-line bars (Eastmoney first, Sina/Tencent fallback).
+
+        fqt: 0=不复权, 1=前复权, 2=后复权。基因次日指标请用 0。
+        """
         code = code.zfill(6)
+        fqt_s = str(int(fqt)) if int(fqt) in (0, 1, 2) else "1"
         params = {
             "secid": to_secid(code),
             "klt": "101",
-            "fqt": "1",
+            "fqt": fqt_s,
             "lmt": str(limit),
             "beg": "0",
             "end": "20500101",

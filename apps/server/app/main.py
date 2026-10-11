@@ -180,13 +180,16 @@ async def stock_fundamentals(code: str):
 
 
 @app.get("/api/stock/{code}/radar")
-async def stock_radar(code: str):
+async def stock_radar(code: str, lookback: str = "1y"):
     try:
-        return await build_stock_radar(code, market_service.client, ths_client)
+        return await build_stock_radar(
+            code, market_service.client, ths_client, lookback=lookback
+        )
     except Exception as e:
         return {
             "code": code,
             "name": "",
+            "lookback": lookback or "1y",
             "gene": {},
             "prices": [],
             "marks": [],

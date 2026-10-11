@@ -85,6 +85,8 @@ interface RadarData {
   name: string;
   as_of?: string;
   lookback?: string;
+  methodology?: string;
+  methodology_label?: string;
   gene: {
     zt_days?: number;
     dt_days?: number;
@@ -108,7 +110,21 @@ interface RadarData {
   }[];
 }
 
-function GeneGrid({ gene, asOf }: { gene: RadarData["gene"]; asOf?: string }) {
+type GeneLookback = "1y" | "3y";
+
+function GeneGrid({
+  gene,
+  asOf,
+  methodologyLabel,
+  lookback,
+  onLookbackChange,
+}: {
+  gene: RadarData["gene"];
+  asOf?: string;
+  methodologyLabel?: string;
+  lookback: GeneLookback;
+  onLookbackChange: (v: GeneLookback) => void;
+}) {
   const cells = [
     {
       label: "涨/跌停天数",
@@ -138,12 +154,42 @@ function GeneGrid({ gene, asOf }: { gene: RadarData["gene"]; asOf?: string }) {
       node: <>{gene.board_rate != null ? formatPct(gene.board_rate) : "—"}</>,
     },
   ];
+  const spanLabel = lookback === "3y" ? "近三年" : "近一年";
   return (
     <div className="radar-block">
-      <div className="radar-block-title">
-        涨停基因
-        {asOf && <span className="radar-asof">近三年（截至 {asOf}）</span>}
+      <div className="radar-block-title gene-title-row">
+        <span className="gene-title-text">
+          涨停基因
+          {asOf ? (
+            <span className="radar-asof">
+              {spanLabel}（截至 {asOf}）
+            </span>
+          ) : null}
+        </span>
+        <div className="gene-lookback-tabs" role="tablist" aria-label="涨停基因周期">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={lookback === "1y"}
+            className={lookback === "1y" ? "gene-lb-tab on" : "gene-lb-tab"}
+            onClick={() => onLookbackChange("1y")}
+          >
+            一年
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={lookback === "3y"}
+            className={lookback === "3y" ? "gene-lb-tab on" : "gene-lb-tab"}
+            onClick={() => onLookbackChange("3y")}
+          >
+            三年
+          </button>
+        </div>
       </div>
+      {methodologyLabel ? (
+        <div className="radar-method muted">{methodologyLabel}</div>
+      ) : null}
       <div className="gene-grid">
         {cells.map((c) => (
           <div key={c.label} className="gene-cell">
@@ -435,6 +481,16 @@ export function StockDetailDrawer({
 }) {
   const [radar, setRadar] = useState<RadarData | null>(null);
   const [radarLoading, setRadarLoading] = useState(false);
+  const [geneLookback, setGeneLookback] = useState<GeneLookback>("1y");
+
+  useEffect(() => {
+    if (!open) {
+      setRadar(null);
+      setGeneLookback("1y");
+      return;
+    }
+    setGeneLookback("1y");
+  }, [open, stock?.code]);
 
   useEffect(() => {
     if (!open || !stock?.code) {
@@ -442,16 +498,17 @@ export function StockDetailDrawer({
       return;
     }
     let cancelled = false;
-    const key = `radar:v3y:${stock.code}`;
+    const key = `radar:v4:${stock.code}:${geneLookback}`;
     const cached = cacheGet<RadarData>(key);
-    // 旧缓存可能是近一年窗口，强制要求 lookback=3y
-    if (cached?.prices && cached.lookback === "3y") {
+    if (cached?.prices && cached.lookback === geneLookback) {
       setRadar(cached);
       setRadarLoading(false);
     } else {
       setRadarLoading(true);
     }
-    fetch(`/api/stock/${stock.code}/radar`)
+    fetch(
+      `/api/stock/${stock.code}/radar?lookback=${encodeURIComponent(geneLookback)}`,
+    )
       .then((r) => r.json())
       .then((data: RadarData) => {
         if (cancelled) return;
@@ -469,7 +526,7 @@ export function StockDetailDrawer({
     return () => {
       cancelled = true;
     };
-  }, [open, stock?.code]);
+  }, [open, stock?.code, geneLookback]);
 
   // hide legacy rate fields when radar gene is shown
   const basicFields = fields.filter(
@@ -506,7 +563,13 @@ export function StockDetailDrawer({
 
       {radar && (
         <>
-          <GeneGrid gene={radar.gene || {}} asOf={radar.as_of} />
+          <GeneGrid
+            gene={radar.gene || {}}
+            asOf={radar.as_of}
+            methodologyLabel={radar.methodology_label}
+            lookback={geneLookback}
+            onLookbackChange={setGeneLookback}
+          />
           <div className="radar-block">
             <RadarChart prices={radar.prices || []} marks={radar.marks || []} />
           </div>
