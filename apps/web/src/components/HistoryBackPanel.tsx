@@ -1,4 +1,9 @@
-import { LeftOutlined, RightOutlined, SearchOutlined } from "@ant-design/icons";
+import {
+  LeftOutlined,
+  LineChartOutlined,
+  RightOutlined,
+  SearchOutlined,
+} from "@ant-design/icons";
 import { Button, DatePicker, Empty, Input, Segmented, Spin, Tag } from "antd";
 import dayjs, { type Dayjs } from "dayjs";
 import customParseFormat from "dayjs/plugin/customParseFormat";
@@ -114,7 +119,7 @@ function StockChip({
   onOpenChart?: (s: StockItem) => void;
   hit?: boolean;
   dim?: boolean;
-  chipRef?: (el: HTMLButtonElement | null) => void;
+  chipRef?: (el: HTMLDivElement | null) => void;
 }) {
   const concept = stock.reason || stock.concepts?.[0] || stock.industry || "";
   const cls = [
@@ -125,12 +130,18 @@ function StockChip({
     .filter(Boolean)
     .join(" ");
   return (
-    <button
-      type="button"
+    <div
       ref={chipRef}
       className={cls}
+      role="button"
+      tabIndex={0}
       onClick={() => onClick(stock)}
-      onDoubleClick={() => onOpenChart?.(stock)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onClick(stock);
+        }
+      }}
       title={`${stock.name} ${stock.code}`}
     >
       <span className="kpl-chip-time">{sealTimeShort(stock.first_seal_time)}</span>
@@ -139,7 +150,20 @@ function StockChip({
       {stock.zt_stats && /一字/.test(stock.zt_stats) ? (
         <span className="kpl-chip-tag">一字</span>
       ) : null}
-    </button>
+      {onOpenChart ? (
+        <button
+          type="button"
+          className="kpl-chip-chart"
+          title="查看当日分时/日K"
+          onClick={(e) => {
+            e.stopPropagation();
+            onOpenChart(stock);
+          }}
+        >
+          <LineChartOutlined />
+        </button>
+      ) : null}
+    </div>
   );
 }
 
@@ -169,7 +193,7 @@ export function HistoryBackPanel({
   const reqSeq = useRef(0);
   const stockReqSeq = useRef(0);
   const panelRef = useRef<HTMLDivElement>(null);
-  const hitChipRef = useRef<HTMLButtonElement | null>(null);
+  const hitChipRef = useRef<HTMLDivElement | null>(null);
 
   const displayCols = useMemo(() => ensureReasonColumn(columns), [columns]);
   const dateValue = useMemo(() => fromYmd(date), [date]);
@@ -651,6 +675,7 @@ export function HistoryBackPanel({
         stock={chartStock}
         open={!!chartStock}
         onClose={() => setChartStock(null)}
+        asOfDate={date}
       />
     </div>
   );

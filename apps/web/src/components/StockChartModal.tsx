@@ -4,7 +4,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { cacheGet, cacheSet } from "../lib/localCache";
 
 type ChartStock = { code: string; name: string };
-type TrendPoint = { time: string; price: number; avg: number; volume: number };
+type TrendPoint = {
+  time: string;
+  price: number;
+  avg: number;
+  volume: number;
+  amount?: number | null;
+};
 type KBar = {
   date: string;
   open: number;
@@ -12,18 +18,27 @@ type KBar = {
   low: number;
   high: number;
   volume?: number;
+  amount?: number | null;
+  amplitude?: number | null;
   pct?: number;
+  change?: number | null;
+  turnover?: number | null;
 };
 
 const UP = "#e11d2e";
 const DOWN = "#0a8f3d";
 const PRICE_LINE = "#2563eb";
 const AVG_LINE = "#f59e0b";
-const MA5_C = "#3b82f6";
+const MA5_C = "#94a3b8";
 const MA10_C = "#eab308";
-const MA20_C = "#d946ef";
-const DIF_C = "#2563eb";
-const DEA_C = "#d946ef";
+const MA20_C = "#a855f7";
+const MA30_C = "#22c55e";
+const MA60_C = "#3b82f6";
+const VOL_MA5_C = "#f59e0b";
+const VOL_MA10_C = "#a855f7";
+
+const KLINE_LIMIT = 500;
+const KLINE_VIEW = 100;
 
 type ChartPalette = {
   bg: string;
@@ -47,11 +62,11 @@ function readDark(): boolean {
 function chartPalette(dark: boolean): ChartPalette {
   if (dark) {
     return {
-      bg: "#161b22",
+      bg: "#12181f",
       text: "#e6edf3",
       muted: "#8b949e",
-      grid: "#30363d",
-      axisLine: "#3d444d",
+      grid: "#1e2730",
+      axisLine: "#30363d",
       midLabel: "#e6edf3",
       tooltipBg: "rgba(22,27,34,0.96)",
       tooltipBorder: "#30363d",
@@ -63,12 +78,12 @@ function chartPalette(dark: boolean): ChartPalette {
   }
   return {
     bg: "#ffffff",
-    text: "#374151",
+    text: "#111827",
     muted: "#6b7280",
-    grid: "#e5e7eb",
-    axisLine: "#cbd5e1",
+    grid: "#eef2f7",
+    axisLine: "#d1d5db",
     midLabel: "#111827",
-    tooltipBg: "rgba(255,255,255,0.96)",
+    tooltipBg: "rgba(255,255,255,0.98)",
     tooltipBorder: "#e5e7eb",
     pointer: "#94a3b8",
     areaTop: "rgba(37,99,235,0.18)",
@@ -139,26 +154,6 @@ function smaSeries(closes: number[], n: number): Array<number | "-"> {
   });
 }
 
-function emaSeries(values: number[], n: number): number[] {
-  const k = 2 / (n + 1);
-  const out: number[] = [];
-  let prev = values[0] ?? 0;
-  for (let i = 0; i < values.length; i++) {
-    prev = i === 0 ? values[i] : values[i] * k + prev * (1 - k);
-    out.push(prev);
-  }
-  return out;
-}
-
-function macdOf(closes: number[]) {
-  const e12 = emaSeries(closes, 12);
-  const e26 = emaSeries(closes, 26);
-  const dif = closes.map((_, i) => e12[i] - e26[i]);
-  const dea = emaSeries(dif, 9);
-  const hist = dif.map((d, i) => (d - dea[i]) * 2);
-  return { dif, dea, hist };
-}
-
 function barPct(bars: KBar[], index: number): number {
   const b = bars[index];
   if (!b) return 0;
@@ -168,6 +163,63 @@ function barPct(bars: KBar[], index: number): number {
   const prev = index > 0 ? bars[index - 1].close : 0;
   if (prev > 0) return ((b.close - prev) / prev) * 100;
   return 0;
+}
+
+function barChange(bars: KBar[], index: number): number {
+  const b = bars[index];
+  if (!b) return 0;
+  if (typeof b.change === "number" && !Number.isNaN(b.change)) return b.change;
+  const prev = index > 0 ? bars[index - 1].close : 0;
+  if (prev > 0) return b.close - prev;
+  return 0;
+}
+
+function barAmplitude(bars: KBar[], index: number): number | null {
+  const b = bars[index];
+  if (!b) return null;
+  if (typeof b.amplitude === "number" && !Number.isNaN(b.amplitude)) return b.amplitude;
+  const prev = index > 0 ? bars[index - 1].close : 0;
+  if (prev > 0 && b.high > 0 && b.low > 0) {
+    return ((b.high - b.low) / prev) * 100;
+  }
+  return null;
+}
+
+function fmtVolHands(volume?: number | null): string {
+  if (volume == null || Number.isNaN(volume) || volume <= 0) return "—";
+  const hands = volume >= 100 ? volume / 100 : volume;
+  if (hands >= 1e8) return `${(hands / 1e8).toFixed(2)}亿`;
+  if (hands >= 1e4) return `${(hands / 1e4).toFixed(2)}万`;
+  return `${hands.toFixed(0)}`;
+}
+
+function fmtAmount(amount?: number | null): string {
+  if (amount == null || Number.isNaN(amount) || amount <= 0) return "—";
+  if (amount >= 1e8) return `${(amount / 1e8).toFixed(2)}亿`;
+  if (amount >= 1e4) return `${(amount / 1e4).toFixed(2)}万`;
+  return amount.toFixed(0);
+}
+
+function fmtNum(v: number | null | undefined, digits = 2): string {
+  if (v == null || Number.isNaN(v)) return "—";
+  return v.toFixed(digits);
+}
+
+function tipRow(
+  label: string,
+  value: string,
+  color?: string,
+): string {
+  const valStyle = color
+    ? `color:${color};font-weight:600`
+    : "font-weight:600";
+  return `<div style="display:flex;justify-content:space-between;gap:24px;line-height:1.7"><span style="color:inherit;opacity:.72">${label}</span><span style="${valStyle}">${value}</span></div>`;
+}
+
+function priceTone(v: number, base: number): string {
+  if (v > base + 1e-9) return UP;
+  if (v < base - 1e-9) return DOWN;
+  return "inherit";
 }
 
 function buildTrendOption(points: TrendPoint[], preClose: number, dark: boolean) {
@@ -206,28 +258,16 @@ function buildTrendOption(points: TrendPoint[], preClose: number, dark: boolean)
           ? cur >= prev
           : cur >= pre
         : true;
-    return { value: v, itemStyle: { color: up ? UP : DOWN } };
+    return { value: v / 100, itemStyle: { color: up ? UP : DOWN } };
   });
 
-  // 例图：约每 15 分钟一个刻度，覆盖到 14:45/14:57
   const labelSet = new Set([
     "09:30",
-    "09:45",
-    "10:00",
-    "10:15",
     "10:30",
-    "10:45",
-    "11:00",
-    "11:15",
     "11:30",
     "13:00",
-    "13:15",
-    "13:30",
-    "13:45",
     "14:00",
-    "14:15",
-    "14:30",
-    "14:45",
+    "15:00",
     "14:57",
   ]);
 
@@ -236,17 +276,20 @@ function buildTrendOption(points: TrendPoint[], preClose: number, dark: boolean)
     animation: false,
     axisPointer: {
       link: [{ xAxisIndex: "all" }],
-      label: { backgroundColor: dark ? "#484f58" : "#334155" },
+      label: { show: false },
     },
     tooltip: {
       trigger: "axis",
       axisPointer: {
         type: "cross",
-        label: { backgroundColor: dark ? "#484f58" : "#334155" },
+        label: { show: false },
         lineStyle: { color: pal.pointer, type: "dashed", width: 1 },
       },
       backgroundColor: pal.tooltipBg,
       borderColor: pal.tooltipBorder,
+      borderWidth: 1,
+      padding: [8, 12],
+      extraCssText: "box-shadow:0 4px 14px rgba(0,0,0,.12);",
       textStyle: { color: pal.text, fontSize: 12 },
       formatter: (params: unknown) => {
         const list = Array.isArray(params) ? params : [];
@@ -256,18 +299,26 @@ function buildTrendOption(points: TrendPoint[], preClose: number, dark: boolean)
         if (!p) return `${times[idx] || ""}<br/>暂无数据`;
         const chg = ((p.price - pre) / pre) * 100;
         const chgColor = chg >= 0 ? UP : DOWN;
-        return [
-          `<div style="font-weight:600;margin-bottom:4px">${p.time}</div>`,
-          `价格 <b style="color:${chgColor}">${p.price.toFixed(2)}</b>`,
-          `均价 <b style="color:${AVG_LINE}">${p.avg.toFixed(2)}</b>`,
-          `涨跌 <b style="color:${chgColor}">${chg >= 0 ? "+" : ""}${chg.toFixed(2)}%</b>`,
-          `量 ${(p.volume / 100).toFixed(0)} 手`,
-        ].join("<br/>");
+        const rows = [
+          `<div style="font-weight:700;margin-bottom:4px">${p.time}</div>`,
+          tipRow("价格", p.price.toFixed(2), chgColor),
+          tipRow("均价", p.avg.toFixed(2), AVG_LINE),
+          tipRow(
+            "涨跌幅",
+            `${chg >= 0 ? "+" : ""}${chg.toFixed(2)}%`,
+            chgColor,
+          ),
+          tipRow("成交量", `${fmtVolHands(p.volume)}手`),
+        ];
+        if (p.amount != null && p.amount > 0) {
+          rows.push(tipRow("成交额", fmtAmount(p.amount)));
+        }
+        return rows.join("");
       },
     },
     grid: [
-      { left: 62, right: 62, top: 18, height: "62%" },
-      { left: 62, right: 62, top: "78%", height: "16%" },
+      { left: 56, right: 56, top: 18, height: "62%" },
+      { left: 56, right: 56, top: "78%", height: "16%" },
     ],
     xAxis: [
       {
@@ -281,7 +332,11 @@ function buildTrendOption(points: TrendPoint[], preClose: number, dark: boolean)
           fontSize: 11,
           interval: 0,
           hideOverlap: true,
-          formatter: (value: string) => (labelSet.has(value) ? value : ""),
+          formatter: (value: string) => {
+            if (value === "11:30") return "11:30/13:00";
+            if (value === "14:57") return "15:00";
+            return labelSet.has(value) ? value : "";
+          },
         },
         splitLine: { show: false },
       },
@@ -305,6 +360,7 @@ function buildTrendOption(points: TrendPoint[], preClose: number, dark: boolean)
         axisLine: { show: false },
         axisTick: { show: false },
         splitLine: { lineStyle: { type: "dashed", color: pal.grid } },
+        axisPointer: { label: { show: false } },
         axisLabel: {
           fontSize: 11,
           formatter: (v: number) => {
@@ -328,12 +384,13 @@ function buildTrendOption(points: TrendPoint[], preClose: number, dark: boolean)
         axisLine: { show: false },
         axisTick: { show: false },
         splitLine: { show: false },
+        axisPointer: { label: { show: false } },
         axisLabel: {
           fontSize: 11,
           formatter: (v: number) => {
             if (v > 1e-6) return `{up|${Math.abs(v).toFixed(2)}%}`;
             if (v < -1e-6) return `{down|-${Math.abs(v).toFixed(2)}%}`;
-            return `{mid|0%}`;
+            return `{mid|0.00%}`;
           },
           rich: {
             up: { color: UP, fontSize: 11 },
@@ -350,7 +407,16 @@ function buildTrendOption(points: TrendPoint[], preClose: number, dark: boolean)
         axisTick: { show: false },
         splitNumber: 2,
         splitLine: { show: false },
-        axisLabel: { show: false },
+        axisPointer: { label: { show: false } },
+        axisLabel: {
+          show: true,
+          color: pal.muted,
+          fontSize: 10,
+          formatter: (v: number) => {
+            if (v >= 1e4) return `${(v / 1e4).toFixed(1)}万`;
+            return `${Math.round(v)}`;
+          },
+        },
       },
     ],
     series: [
@@ -412,28 +478,103 @@ function buildTrendOption(points: TrendPoint[], preClose: number, dark: boolean)
   };
 }
 
-function buildKlineOption(bars: KBar[], dark: boolean) {
+function normBarDate(d: string): string {
+  const raw = (d || "").replace(/-/g, "").trim();
+  if (raw.length >= 8) return raw.slice(0, 8);
+  return "";
+}
+
+function buildKlineOption(bars: KBar[], dark: boolean, focusDate?: string) {
   const pal = chartPalette(dark);
   const dates = bars.map((b) => b.date);
   const values = bars.map((b) => [b.open, b.close, b.low, b.high]);
   const vols = bars.map((b) => b.volume ?? 0);
   const closes = bars.map((b) => b.close);
-  const { dif, dea, hist } = macdOf(closes);
-  const labelStep = Math.max(1, Math.floor(dates.length / 6));
+  const n = dates.length;
+  const view = Math.min(KLINE_VIEW, n);
+  const focus = normBarDate(focusDate || "");
+  let startPct = n > 0 ? Math.max(0, ((n - view) / n) * 100) : 0;
+  let endPct = 100;
+  if (focus && n > 0) {
+    const idx = dates.findIndex((d) => normBarDate(d) === focus);
+    if (idx >= 0) {
+      const half = Math.floor(view / 2);
+      const from = Math.max(0, idx - half);
+      const to = Math.min(n - 1, from + view - 1);
+      const from2 = Math.max(0, to - view + 1);
+      startPct = (from2 / n) * 100;
+      endPct = ((to + 1) / n) * 100;
+    }
+  }
   const ptrBg = dark ? "#484f58" : "#334155";
 
   return {
     backgroundColor: pal.bg,
     animation: false,
+    legend: { show: false },
     axisPointer: {
       link: [{ xAxisIndex: "all" }],
       label: { backgroundColor: ptrBg, color: "#fff" },
     },
-    tooltip: { show: false },
+    tooltip: {
+      trigger: "axis",
+      axisPointer: {
+        type: "cross",
+        label: { backgroundColor: ptrBg },
+        lineStyle: { color: pal.pointer, type: "dashed", width: 1 },
+      },
+      backgroundColor: pal.tooltipBg,
+      borderColor: pal.tooltipBorder,
+      borderWidth: 1,
+      padding: [10, 12],
+      extraCssText: "box-shadow:0 6px 18px rgba(0,0,0,.14);min-width:168px;",
+      textStyle: { color: pal.text, fontSize: 12 },
+      formatter: (params: unknown) => {
+        const list = Array.isArray(params) ? params : [];
+        if (!list.length) return "";
+        const idx = (list[0] as { dataIndex?: number }).dataIndex ?? 0;
+        const b = bars[idx];
+        if (!b) return "";
+        const prevClose = idx > 0 ? bars[idx - 1].close : b.open;
+        const pct = barPct(bars, idx);
+        const chg = barChange(bars, idx);
+        const amp = barAmplitude(bars, idx);
+        const tone = pct >= 0 ? UP : DOWN;
+        return [
+          `<div style="font-weight:700;margin-bottom:6px">${b.date}</div>`,
+          tipRow("开盘", b.open.toFixed(2), priceTone(b.open, prevClose)),
+          tipRow("收盘", b.close.toFixed(2), tone),
+          tipRow("最高", b.high.toFixed(2), priceTone(b.high, prevClose)),
+          tipRow("最低", b.low.toFixed(2), priceTone(b.low, prevClose)),
+          tipRow("涨跌幅", `${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%`, tone),
+          tipRow("涨跌额", `${chg >= 0 ? "+" : ""}${chg.toFixed(2)}`, tone),
+          tipRow("成交量", `${fmtVolHands(b.volume)}手`),
+          tipRow("成交额", fmtAmount(b.amount)),
+          tipRow("振幅", amp != null ? `${amp.toFixed(2)}%` : "—"),
+          tipRow(
+            "换手率",
+            b.turnover != null && !Number.isNaN(b.turnover)
+              ? `${b.turnover.toFixed(2)}%`
+              : "—",
+          ),
+        ].join("");
+      },
+    },
+    dataZoom: [
+      {
+        type: "inside",
+        xAxisIndex: [0, 1],
+        start: startPct,
+        end: endPct,
+        zoomOnMouseWheel: true,
+        moveOnMouseMove: true,
+        moveOnMouseWheel: false,
+        preventDefaultMouseMove: true,
+      },
+    ],
     grid: [
-      { left: 12, right: 68, top: 12, height: "52%" },
-      { left: 12, right: 68, top: "68%", height: "12%" },
-      { left: 12, right: 68, top: "84%", height: "12%" },
+      { left: 12, right: 64, top: 28, height: "58%" },
+      { left: 12, right: 64, top: "74%", height: "18%" },
     ],
     xAxis: [
       {
@@ -443,7 +584,7 @@ function buildKlineOption(bars: KBar[], dark: boolean) {
         axisLabel: {
           color: pal.muted,
           fontSize: 11,
-          interval: (idx: number) => idx % labelStep === 0,
+          hideOverlap: true,
         },
         axisTick: { show: false },
         axisLine: { lineStyle: { color: pal.axisLine } },
@@ -458,16 +599,6 @@ function buildKlineOption(bars: KBar[], dark: boolean) {
       {
         type: "category",
         gridIndex: 1,
-        data: dates,
-        boundaryGap: true,
-        axisLabel: { show: false },
-        axisTick: { show: false },
-        axisLine: { lineStyle: { color: pal.axisLine } },
-        axisPointer: { label: { show: false } },
-      },
-      {
-        type: "category",
-        gridIndex: 2,
         data: dates,
         boundaryGap: true,
         axisLabel: { show: false },
@@ -495,17 +626,16 @@ function buildKlineOption(bars: KBar[], dark: boolean) {
         position: "right",
         splitNumber: 2,
         splitLine: { show: false },
-        axisLabel: { show: false },
-        axisPointer: { label: { show: false } },
-      },
-      {
-        type: "value",
-        gridIndex: 2,
-        scale: true,
-        position: "right",
-        splitNumber: 2,
-        splitLine: { lineStyle: { type: "dashed", color: pal.grid } },
-        axisLabel: { color: pal.muted, fontSize: 10 },
+        axisLabel: {
+          show: true,
+          color: pal.muted,
+          fontSize: 10,
+          formatter: (v: number) => {
+            const hands = v / 100;
+            if (hands >= 1e4) return `${(hands / 1e4).toFixed(1)}万`;
+            return `${Math.round(hands)}`;
+          },
+        },
         axisPointer: { label: { show: false } },
       },
     ],
@@ -547,6 +677,22 @@ function buildKlineOption(bars: KBar[], dark: boolean) {
         z: 3,
       },
       {
+        name: "MA30",
+        type: "line",
+        data: smaSeries(closes, 30),
+        showSymbol: false,
+        lineStyle: { width: 1, color: MA30_C },
+        z: 3,
+      },
+      {
+        name: "MA60",
+        type: "line",
+        data: smaSeries(closes, 60),
+        showSymbol: false,
+        lineStyle: { width: 1, color: MA60_C },
+        z: 3,
+      },
+      {
         name: "成交量",
         type: "bar",
         xAxisIndex: 1,
@@ -555,34 +701,27 @@ function buildKlineOption(bars: KBar[], dark: boolean) {
           value: v,
           itemStyle: { color: bars[i].close >= bars[i].open ? UP : DOWN },
         })),
+        barMaxWidth: 8,
       },
       {
-        name: "MACD",
-        type: "bar",
-        xAxisIndex: 2,
-        yAxisIndex: 2,
-        data: hist.map((v) => ({
-          value: +v.toFixed(4),
-          itemStyle: { color: v >= 0 ? UP : DOWN },
-        })),
-      },
-      {
-        name: "DIF",
+        name: "VOL-MA5",
         type: "line",
-        xAxisIndex: 2,
-        yAxisIndex: 2,
-        data: dif.map((v) => +v.toFixed(4)),
+        xAxisIndex: 1,
+        yAxisIndex: 1,
+        data: smaSeries(vols, 5),
         showSymbol: false,
-        lineStyle: { width: 1, color: DIF_C },
+        lineStyle: { width: 1, color: VOL_MA5_C },
+        z: 3,
       },
       {
-        name: "DEA",
+        name: "VOL-MA10",
         type: "line",
-        xAxisIndex: 2,
-        yAxisIndex: 2,
-        data: dea.map((v) => +v.toFixed(4)),
+        xAxisIndex: 1,
+        yAxisIndex: 1,
+        data: smaSeries(vols, 10),
         showSymbol: false,
-        lineStyle: { width: 1, color: DEA_C },
+        lineStyle: { width: 1, color: VOL_MA10_C },
+        z: 3,
       },
     ],
   };
@@ -616,40 +755,41 @@ function KInfoBar({ bars, index }: { bars: KBar[]; index: number }) {
   const i = index >= 0 && index < bars.length ? index : bars.length - 1;
   const b = bars[i];
   if (!b) return null;
-  const pct = barPct(bars, i);
-  const up = pct >= 0;
-  const tone = up ? UP : DOWN;
   const closes = bars.map((x) => x.close);
+  const vols = bars.map((x) => x.volume ?? 0);
   const ma5 = smaAt(closes, i, 5);
   const ma10 = smaAt(closes, i, 10);
   const ma20 = smaAt(closes, i, 20);
-  const fmt = (v: number | null) => (v == null ? "—" : v.toFixed(2));
+  const ma30 = smaAt(closes, i, 30);
+  const ma60 = smaAt(closes, i, 60);
+  const vma5 = smaAt(vols, i, 5);
+  const vma10 = smaAt(vols, i, 10);
   return (
     <div className="chart-k-info">
       <span className="k-date">{b.date}</span>
       <span>
-        开 <b style={{ color: tone }}>{b.open.toFixed(2)}</b>
+        MA5: <b style={{ color: MA5_C }}>{fmtNum(ma5)}</b>
       </span>
       <span>
-        高 <b style={{ color: tone }}>{b.high.toFixed(2)}</b>
+        MA10: <b style={{ color: MA10_C }}>{fmtNum(ma10)}</b>
       </span>
       <span>
-        低 <b style={{ color: tone }}>{b.low.toFixed(2)}</b>
+        MA20: <b style={{ color: MA20_C }}>{fmtNum(ma20)}</b>
       </span>
       <span>
-        收 <b style={{ color: tone }}>{b.close.toFixed(2)}</b>
+        MA30: <b style={{ color: MA30_C }}>{fmtNum(ma30)}</b>
       </span>
       <span>
-        涨幅 <b style={{ color: tone }}>{pct.toFixed(2)}%</b>
+        MA60: <b style={{ color: MA60_C }}>{fmtNum(ma60)}</b>
       </span>
       <span>
-        MA5: <b style={{ color: MA5_C }}>{fmt(ma5)}</b>
+        成交量: <b>{fmtVolHands(b.volume)}</b>
       </span>
       <span>
-        MA10: <b style={{ color: MA10_C }}>{fmt(ma10)}</b>
+        MA5: <b style={{ color: VOL_MA5_C }}>{fmtVolHands(vma5)}</b>
       </span>
       <span>
-        MA20: <b style={{ color: MA20_C }}>{fmt(ma20)}</b>
+        MA10: <b style={{ color: VOL_MA10_C }}>{fmtVolHands(vma10)}</b>
       </span>
     </div>
   );
@@ -659,10 +799,13 @@ export function StockChartModal({
   stock,
   open,
   onClose,
+  asOfDate,
 }: {
   stock: ChartStock | null;
   open: boolean;
   onClose: () => void;
+  /** 历史回溯指定交易日 YYYYMMDD / YYYY-MM-DD，分时按该日、日K定位到该日 */
+  asOfDate?: string | null;
 }) {
   const [tab, setTab] = useState<"trends" | "kline">("trends");
   const [loading, setLoading] = useState(false);
@@ -675,6 +818,10 @@ export function StockChartModal({
   const [klines, setKlines] = useState<KBar[] | null>(null);
   const [kIndex, setKIndex] = useState(-1);
   const [dark, setDark] = useState(() => readDark());
+  const focusDay = normBarDate(asOfDate || "");
+  const focusDayLabel = focusDay
+    ? `${focusDay.slice(0, 4)}-${focusDay.slice(4, 6)}-${focusDay.slice(6, 8)}`
+    : "";
 
   const boxRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<echarts.ECharts | null>(null);
@@ -693,6 +840,14 @@ export function StockChartModal({
     return () => obs.disconnect();
   }, []);
 
+  useEffect(() => {
+    if (!open) return;
+    setTab("trends");
+    setTrends(null);
+    setKlines(null);
+    setKIndex(-1);
+    setError("");
+  }, [open, stock?.code, focusDay]);
 
   const disposeChart = useCallback(() => {
     roRef.current?.disconnect();
@@ -701,20 +856,23 @@ export function StockChartModal({
     chartRef.current = null;
   }, []);
 
-  const ensureChart = useCallback((el: HTMLDivElement) => {
-    if (chartRef.current) {
-      const dom = chartRef.current.getDom();
-      if (dom === el) return chartRef.current;
-      disposeChart();
-    }
-    const chart = echarts.init(el);
-    chartRef.current = chart;
-    roRef.current = new ResizeObserver(() => {
-      chart.resize();
-    });
-    roRef.current.observe(el);
-    return chart;
-  }, [disposeChart]);
+  const ensureChart = useCallback(
+    (el: HTMLDivElement) => {
+      if (chartRef.current) {
+        const dom = chartRef.current.getDom();
+        if (dom === el) return chartRef.current;
+        disposeChart();
+      }
+      const chart = echarts.init(el);
+      chartRef.current = chart;
+      roRef.current = new ResizeObserver(() => {
+        chart.resize();
+      });
+      roRef.current.observe(el);
+      return chart;
+    },
+    [disposeChart],
+  );
 
   const paint = useCallback(() => {
     const el = boxRef.current;
@@ -736,7 +894,7 @@ export function StockChartModal({
           chart.clear();
           chart.setOption(emptyTitle("暂无日线数据", dark), true);
         } else {
-          chart.setOption(buildKlineOption(klines, dark), true);
+          chart.setOption(buildKlineOption(klines, dark, focusDay || undefined), true);
           chart.off("click");
           chart.on("click", (p: { dataIndex?: number }) => {
             if (typeof p?.dataIndex === "number") kPickRef.current(p.dataIndex);
@@ -768,9 +926,8 @@ export function StockChartModal({
       setError("图表渲染失败");
       return false;
     }
-  }, [ensureChart, tab, trends, klines, dark]);
+  }, [ensureChart, tab, trends, klines, dark, focusDay]);
 
-  // 打开时立刻拉分时；切日线时再拉 K 线。数据与挂载解耦。
   useEffect(() => {
     if (!open || !stock) return;
     let cancelled = false;
@@ -779,7 +936,7 @@ export function StockChartModal({
       setError("");
       try {
         if (tab === "trends") {
-          const ckey = `trends:${stock.code}`;
+          const ckey = `trends:${stock.code}:${focusDay || "latest"}`;
           const cached = cacheGet<{
             points: TrendPoint[];
             preClose: number;
@@ -791,35 +948,52 @@ export function StockChartModal({
           } else {
             setLoading(true);
           }
-          const res = await fetch(`/api/stock/${stock.code}/trends`);
+          const q = focusDay
+            ? `?date=${encodeURIComponent(focusDay)}`
+            : "";
+          const res = await fetch(`/api/stock/${stock.code}/trends${q}`);
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
           const data = await res.json();
           if (cancelled) return;
           const next = {
             points: (data.points || []) as TrendPoint[],
             preClose: Number(data.pre_close) || 0,
-            tradeDate: String(data.trade_date || ""),
+            tradeDate: String(data.trade_date || focusDay || ""),
           };
           setTrends(next);
-          if (next.points.length) cacheSet(ckey, next, 20);
+          if (next.points.length) {
+            cacheSet(ckey, next, focusDay ? 30 * 60 : 20);
+          } else if (focusDay) {
+            setError(`暂无 ${focusDay.slice(0, 4)}-${focusDay.slice(4, 6)}-${focusDay.slice(6, 8)} 分时数据`);
+          }
         } else {
-          const ckey = `kline:${stock.code}:120`;
+          const ckey = `kline:v3:${stock.code}:${KLINE_LIMIT}`;
           const cached = cacheGet<KBar[]>(ckey);
-          if (cached?.length && klineCacheFresh(cached)) {
+          if (cached?.length && (focusDay || klineCacheFresh(cached))) {
             setKlines(cached);
-            setKIndex(cached.length - 1);
+            const fi = focusDay
+              ? cached.findIndex((b) => normBarDate(b.date) === focusDay)
+              : -1;
+            setKIndex(fi >= 0 ? fi : cached.length - 1);
             setLoading(false);
           } else {
             setLoading(true);
           }
-          const res = await fetch(`/api/stock/${stock.code}/kline?limit=120`);
+          const res = await fetch(
+            `/api/stock/${stock.code}/kline?limit=${KLINE_LIMIT}`,
+          );
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
           const data = await res.json();
           if (cancelled) return;
           const bars = (data.bars || []) as KBar[];
           setKlines(bars);
-          setKIndex(bars.length ? bars.length - 1 : -1);
-          if (bars.length && klineCacheFresh(bars)) cacheSet(ckey, bars, 30);
+          const fi = focusDay
+            ? bars.findIndex((b) => normBarDate(b.date) === focusDay)
+            : -1;
+          setKIndex(fi >= 0 ? fi : bars.length ? bars.length - 1 : -1);
+          if (bars.length && (focusDay || klineCacheFresh(bars))) {
+            cacheSet(ckey, bars, 30);
+          }
         }
       } catch (e) {
         if (!cancelled) {
@@ -835,9 +1009,8 @@ export function StockChartModal({
     return () => {
       cancelled = true;
     };
-  }, [open, stock, tab]);
+  }, [open, stock, tab, focusDay]);
 
-  // 数据或 tab 变化后反复尝试绘制（等 Modal 布局完成）
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
@@ -852,7 +1025,6 @@ export function StockChartModal({
       }
     };
 
-    // 下一帧开始，避开 Modal 入场动画首帧宽高为 0
     const t0 = window.setTimeout(tick, 0);
     const t1 = window.setTimeout(tick, 100);
     const t2 = window.setTimeout(tick, 300);
@@ -865,7 +1037,6 @@ export function StockChartModal({
     };
   }, [open, stock, tab, trends, klines, paint]);
 
-  // 关闭时清理
   useEffect(() => {
     if (open) return;
     disposeChart();
@@ -919,22 +1090,31 @@ export function StockChartModal({
             className={tab === "trends" ? "chart-tab on" : "chart-tab"}
             onClick={() => setTab("trends")}
           >
-            分时图
+            分时
           </button>
           <button
             type="button"
             className={tab === "kline" ? "chart-tab on" : "chart-tab"}
             onClick={() => setTab("kline")}
           >
-            日线图
+            日K
           </button>
         </div>
       }
     >
       <div className="stock-chart-sheet">
-        {tab === "trends" && trends?.tradeDate ? (
+        {tab === "trends" && (trends?.tradeDate || focusDayLabel) ? (
           <div className="chart-k-info">
-            <span className="k-date">分时 · {trends.tradeDate}</span>
+            <span className="k-date">
+              分时 ·{" "}
+              {(() => {
+                const raw = String(trends?.tradeDate || focusDayLabel || "");
+                const d = normBarDate(raw);
+                return d
+                  ? `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}`
+                  : raw;
+              })()}
+            </span>
           </div>
         ) : null}
         {tab === "kline" && klines?.length ? (
@@ -945,7 +1125,7 @@ export function StockChartModal({
             <div
               ref={setBoxRef}
               className="stock-chart-box"
-              key={`${stock?.code || "x"}-${tab}-${open ? "1" : "0"}`}
+              key={`${stock?.code || "x"}-${tab}-${focusDay || "live"}-${open ? "1" : "0"}`}
             />
             {error ? <div className="chart-error">{error}</div> : null}
           </Spin>

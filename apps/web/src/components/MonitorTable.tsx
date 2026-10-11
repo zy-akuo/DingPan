@@ -29,7 +29,7 @@ function buildColumns(
                 size="small"
                 className="name-chart-btn"
                 icon={<LineChartOutlined />}
-                title="查看分时/日线"
+                title="查看分时/日K"
                 onClick={(e) => {
                   e.stopPropagation();
                   onOpenChart(r);

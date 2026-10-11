@@ -196,9 +196,12 @@ async def stock_radar(code: str):
 
 
 @app.get("/api/stock/{code}/trends")
-async def stock_trends(code: str):
+async def stock_trends(code: str, date: str = ""):
     code = code.zfill(6)
-    key = f"trends:{code}"
+    day = (date or "").replace("-", "").strip()
+    if day and (len(day) != 8 or not day.isdigit()):
+        day = ""
+    key = f"trends:{code}:{day or 'latest'}"
     hit = await ttl_cache.get(key)
     # 空结果不命中缓存，避免盘前空数据挡住上一交易日回退
     if (
@@ -211,12 +214,23 @@ async def stock_trends(code: str):
         hit["_cache_hit"] = True
         return hit
     try:
-        data = await market_service.client.fetch_trends(code)
+        data = await market_service.client.fetch_trends(code, date=day or None)
     except Exception:
-        data = {"code": code, "name": "", "pre_close": 0, "points": [], "trade_date": ""}
+        data = {
+            "code": code,
+            "name": "",
+            "pre_close": 0,
+            "points": [],
+            "trade_date": f"{day[0:4]}-{day[4:6]}-{day[6:8]}" if day else "",
+        }
     points = data.get("points") or []
-    # 有数据：盘中短缓存；空：极短缓存避免打爆上游
-    ttl = trading_ttl(20, 180) if points else 8
+    # 历史日可缓存更久；当日短缓存；空：极短缓存
+    if day and points:
+        ttl = trading_ttl(300, 3600)
+    elif points:
+        ttl = trading_ttl(20, 180)
+    else:
+        ttl = 8
     await ttl_cache.set(key, data, ttl, kind="trends")
     data = dict(data)
     data["_cache_hit"] = False

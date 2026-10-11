@@ -84,6 +84,7 @@ interface RadarData {
   code: string;
   name: string;
   as_of?: string;
+  lookback?: string;
   gene: {
     zt_days?: number;
     dt_days?: number;
@@ -141,7 +142,7 @@ function GeneGrid({ gene, asOf }: { gene: RadarData["gene"]; asOf?: string }) {
     <div className="radar-block">
       <div className="radar-block-title">
         涨停基因
-        {asOf && <span className="radar-asof">近一年（截至 {asOf}）</span>}
+        {asOf && <span className="radar-asof">近三年（截至 {asOf}）</span>}
       </div>
       <div className="gene-grid">
         {cells.map((c) => (
@@ -227,9 +228,21 @@ function RadarChart({
 }
 
 function DetailsList({ details }: { details: RadarData["details"] }) {
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+
   if (!details.length) {
     return <div className="muted">暂无涨跌停明细</div>;
   }
+
+  const toggle = (key: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
   // group by year
   const years = new Map<string, RadarData["details"]>();
   for (const d of details) {
@@ -242,44 +255,68 @@ function DetailsList({ details }: { details: RadarData["details"] }) {
       {[...years.entries()].map(([year, rows]) => (
         <div key={year} className="radar-year">
           <div className="radar-year-title">{year}年</div>
-          {rows.map((d) => (
-            <div key={`${d.date}-${d.kind}`} className="radar-detail-card">
-              <div className="radar-detail-head">
-                <span className="radar-date">{d.date.slice(5)}</span>
-                <span className={`radar-tag ${d.kind === "zt" ? "zt" : "dt"}`}>
-                  {d.tag}
-                </span>
+          {rows.map((d) => {
+            const key = `${d.date}-${d.kind}`;
+            const open = expanded.has(key);
+            return (
+              <div
+                key={key}
+                className={`radar-detail-card${open ? " is-open" : " is-collapsed"}`}
+                role="button"
+                tabIndex={0}
+                onClick={() => toggle(key)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    toggle(key);
+                  }
+                }}
+              >
+                <div className="radar-detail-head">
+                  <span className="radar-date">{d.date.slice(5)}</span>
+                  <span className={`radar-tag ${d.kind === "zt" ? "zt" : "dt"}`}>
+                    {d.tag}
+                  </span>
+                  <span className="radar-expand-hint">{open ? "收起" : "展开"}</span>
+                </div>
+                {!open ? (
+                  <div className="radar-reason-collapsed">
+                    <span className="muted">异动原因</span>
+                    <div>{d.reason || "暂无"}</div>
+                  </div>
+                ) : (
+                  <>
+                    <div className="radar-detail-grid">
+                      <div>
+                        <span className="muted">收盘价</span>
+                        <strong>{d.close ? d.close.toFixed(2) : "—"}</strong>
+                      </div>
+                      <div>
+                        <span className="muted">涨幅</span>
+                        <strong className={d.change_pct >= 0 ? "up" : "down"}>
+                          {formatPct(d.change_pct)}
+                        </strong>
+                      </div>
+                      <div>
+                        <span className="muted">封单额</span>
+                        <strong>{formatMoney(d.seal_amount)}</strong>
+                      </div>
+                      <div>
+                        <span className="muted">封成比</span>
+                        <strong>
+                          {d.seal_ratio != null ? formatPct(d.seal_ratio) : "—"}
+                        </strong>
+                      </div>
+                    </div>
+                    <div className="radar-reason">
+                      <span className="muted">异动原因</span>
+                      <div>{d.reason || "暂无"}</div>
+                    </div>
+                  </>
+                )}
               </div>
-              <div className="radar-detail-grid">
-                <div>
-                  <span className="muted">收盘价</span>
-                  <strong>{d.close ? d.close.toFixed(2) : "—"}</strong>
-                </div>
-                <div>
-                  <span className="muted">涨幅</span>
-                  <strong className={d.change_pct >= 0 ? "up" : "down"}>
-                    {formatPct(d.change_pct)}
-                  </strong>
-                </div>
-                <div>
-                  <span className="muted">封单额</span>
-                  <strong>{formatMoney(d.seal_amount)}</strong>
-                </div>
-                <div>
-                  <span className="muted">封成比</span>
-                  <strong>
-                    {d.seal_ratio != null ? formatPct(d.seal_ratio) : "—"}
-                  </strong>
-                </div>
-              </div>
-              {d.reason && (
-                <div className="radar-reason">
-                  <span className="muted">异动原因</span>
-                  <div>{d.reason}</div>
-                </div>
-              )}
-            </div>
-          ))}
+            );
+          })}
         </div>
       ))}
     </div>
@@ -405,9 +442,10 @@ export function StockDetailDrawer({
       return;
     }
     let cancelled = false;
-    const key = `radar:${stock.code}`;
+    const key = `radar:v3y:${stock.code}`;
     const cached = cacheGet<RadarData>(key);
-    if (cached?.prices) {
+    // 旧缓存可能是近一年窗口，强制要求 lookback=3y
+    if (cached?.prices && cached.lookback === "3y") {
       setRadar(cached);
       setRadarLoading(false);
     } else {

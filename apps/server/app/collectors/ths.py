@@ -188,16 +188,21 @@ def _tag_label(row: dict[str, Any]) -> str:
 
 
 async def build_stock_radar(code: str, em: EastMoneyClient, ths: ThsClient) -> dict[str, Any]:
-    """Assemble 涨停雷达: gene stats + price series + rise/limit details."""
+    """Assemble 涨停雷达: gene stats + price series + rise/limit details (~3y)."""
+    from ..db import list_zt_history_by_code
     from ..services.ttl_cache import ttl_cache, trading_ttl
 
+    # ~250 trading days/year × 3，略留余量
+    LOOKBACK_BARS = 780
+    THS_POOL_LIMIT = 36
+
     code = code.zfill(6)
-    cache_key = f"radar:{code}"
+    cache_key = f"radar:v3y:{code}"
     cached = await ttl_cache.get(cache_key)
     if cached and isinstance(cached, dict) and cached.get("prices") is not None:
         return cached
 
-    kline = await em.fetch_kline(code, limit=260)
+    kline = await em.fetch_kline(code, limit=LOOKBACK_BARS)
     bars = kline.get("bars") or []
     name = kline.get("name") or ""
 
@@ -217,16 +222,43 @@ async def build_stock_radar(code: str, em: EastMoneyClient, ths: ThsClient) -> d
         elif pct <= -thr:
             dt_idx.append(i)
 
+    # 本地涨停史（含异动原因）优先补齐，减少同花顺池请求
+    local_reason: dict[str, str] = {}
+    local_board: dict[str, int] = {}
+    try:
+        for row in await list_zt_history_by_code(code):
+            ds = str(row.get("trade_date") or "").replace("-", "")[:8]
+            if len(ds) != 8:
+                continue
+            reason = str(row.get("reason") or "").strip()
+            if reason:
+                local_reason[ds] = reason
+            bc = int(row.get("board_count") or 0)
+            if bc > 0:
+                local_board[ds] = bc
+    except Exception:
+        pass
+
     ths_by_date: dict[str, dict[str, Any]] = {}
     look_dates: list[str] = []
-    for i in reversed(zt_idx[-40:]):
+    for i in reversed(zt_idx):
         d = str(bars[i].get("date") or "").replace("-", "")
-        if d and d not in look_dates:
-            look_dates.append(d)
+        if not d or d in look_dates:
+            continue
+        # 已有本地原因的仍抽一部分最近日期拉板型/封单；其余优先补缺
+        look_dates.append(d)
     today = datetime.now().strftime("%Y%m%d")
     if today not in look_dates:
         look_dates.insert(0, today)
-    look_dates = look_dates[:12]
+
+    # 优先拉取：缺原因的日期 + 最近若干日（板型/封单）
+    missing = [d for d in look_dates if d not in local_reason]
+    recent = look_dates[:16]
+    ordered: list[str] = []
+    for d in missing + recent:
+        if d not in ordered:
+            ordered.append(d)
+    look_dates = ordered[:THS_POOL_LIMIT]
 
     sem = asyncio.Semaphore(4)
 
@@ -274,16 +306,26 @@ async def build_stock_radar(code: str, em: EastMoneyClient, ths: ThsClient) -> d
         elif seal_ratio is not None:
             seal_ratio = round(float(seal_ratio) * 100, 2) if float(seal_ratio) <= 1 else round(float(seal_ratio), 2)
 
+        reason = str(ths_row.get("reason_type") or "").strip() or local_reason.get(ds) or None
+        if is_up:
+            tag = _tag_label(ths_row) if ths_row else ""
+            if not tag and local_board.get(ds, 0) >= 2:
+                tag = f"{local_board[ds]}连板"
+            if not tag:
+                tag = "涨停"
+        else:
+            tag = "跌停"
+
         details.append(
             {
                 "date": date,
                 "kind": "zt" if is_up else "dt",
-                "tag": _tag_label(ths_row) if is_up else "跌停",
+                "tag": tag,
                 "close": close,
                 "change_pct": round(pct, 2),
                 "seal_amount": float(seal) if seal is not None else None,
                 "seal_ratio": seal_ratio,
-                "reason": str(ths_row.get("reason_type") or "") or None,
+                "reason": reason,
                 "reason_info": ths_row.get("reason_info"),
             }
         )
@@ -339,6 +381,7 @@ async def build_stock_radar(code: str, em: EastMoneyClient, ths: ThsClient) -> d
         "code": code,
         "name": name,
         "as_of": end_date,
+        "lookback": "3y",
         "range": {"start": start_date, "end": end_date},
         "gene": {
             "zt_days": zt_n,
@@ -351,7 +394,7 @@ async def build_stock_radar(code: str, em: EastMoneyClient, ths: ThsClient) -> d
         },
         "prices": prices,
         "marks": marks,
-        "details": details[:60],
+        "details": details,
     }
     await ttl_cache.set(cache_key, result, trading_ttl(1800, 7200), kind="radar")
     return result

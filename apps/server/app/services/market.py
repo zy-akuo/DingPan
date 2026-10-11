@@ -1466,7 +1466,7 @@ class MarketService:
         req_ds = self._norm_date(date)
         latest_ds = (self.snapshot.trade_date or "").strip() or today_yyyymmdd()
 
-        cache_key = f"history_zt:kpl:v2:{req_ds}"
+        cache_key = f"history_zt:kpl:v3:{req_ds}"
         cached = await ttl_cache.get(cache_key)
         if (
             cached
@@ -1657,22 +1657,40 @@ class MarketService:
         return 9.5
 
     @staticmethod
-    def _compute_board_streaks(dates_asc: list[str]) -> dict[str, int]:
-        """按相邻涨停日估算连板数（间隔≤4个自然日视为连板，覆盖周末）。"""
+    def _compute_board_streaks(
+        dates_asc: list[str],
+        trade_days: list[str] | None = None,
+    ) -> dict[str, int]:
+        """按相邻涨停日估算连板数。
+
+        优先用交易日日历：仅当上一涨停日是「上一交易日」时连板 +1。
+        这样中间有交易日未涨停（断板）会正确归零，而不会被自然日 gap≤4 误连。
+        无交易日日历时回退为自然日间隔≤3（覆盖周末，但不跨中间交易日）。
+        """
         from datetime import datetime as _dt
 
         boards: dict[str, int] = {}
+        trade_index: dict[str, int] = {}
+        if trade_days:
+            for i, d in enumerate(trade_days):
+                ds = str(d or "").replace("-", "")[:8]
+                if len(ds) == 8 and ds.isdigit() and ds not in trade_index:
+                    trade_index[ds] = i
+
         prev: str | None = None
         prev_board = 0
         for ds in dates_asc:
             if prev is None:
                 boards[ds] = 1
+            elif trade_index and prev in trade_index and ds in trade_index:
+                boards[ds] = prev_board + 1 if trade_index[ds] == trade_index[prev] + 1 else 1
             else:
                 try:
                     gap = (_dt.strptime(ds, "%Y%m%d") - _dt.strptime(prev, "%Y%m%d")).days
                 except ValueError:
                     gap = 99
-                boards[ds] = prev_board + 1 if 1 <= gap <= 4 else 1
+                # 仅周末跨度（≤3）才连板；4 天会把「断板后再涨停」误连
+                boards[ds] = prev_board + 1 if 1 <= gap <= 3 else 1
             prev = ds
             prev_board = boards[ds]
         return boards
@@ -1818,7 +1836,7 @@ class MarketService:
         else:
             return {"query": q, "matches": [], "stock": None, "items": [], "count": 0}
 
-        cache_key = f"history_stock_zt:v4:{code}"
+        cache_key = f"history_stock_zt:v5:{code}"
         cached = await ttl_cache.get(cache_key)
         if cached and isinstance(cached, dict) and cached.get("items") is not None:
             cached = {**cached, "query": q or cached.get("query") or ""}
@@ -1837,8 +1855,11 @@ class MarketService:
         em_name: dict[str, str] = {}
         candidates: set[str] = set()
         rejected: set[str] = set()
+        # K 线确认的涨停日：不得因开盘啦/同花顺池缺失被剔除
+        kline_confirmed: set[str] = set()
 
         # 东财 DMSK：去掉 ST/*ST/退市（开盘啦梯队不含这些 5% 板）
+        # 注意：东财该表会漏日（如丽人丽妆 20250515/20/21），后面用 K 线补齐
         for r in em_rows:
             ds = str(r.get("trade_date") or "")
             if len(ds) != 8 or not ds.isdigit():
@@ -1861,7 +1882,46 @@ class MarketService:
             if str(r.get("reason") or r.get("industry") or "").strip():
                 candidates.add(ds)
 
-        # 开盘啦日缓存：在池中 → 采纳；已加载但不在池中 → 剔除
+        # 先拉 K 线：补齐东财漏日 + 剔除未真正涨停的伪日期
+        try:
+            kline = await self.client.fetch_kline(code, limit=780)
+            bars = list(kline.get("bars") or [])
+            pct_map = self._kline_pct_map(bars)
+            trade_days = [
+                str(b.get("date") or "").replace("-", "")[:8]
+                for b in bars
+                if len(str(b.get("date") or "").replace("-", "")[:8]) == 8
+            ]
+        except Exception:
+            pct_map = {}
+            trade_days = []
+
+        for ds, pct in pct_map.items():
+            hist = em_name.get(ds) or str((local_by_date.get(ds) or {}).get("name") or name)
+            if self._is_st_like_name(hist):
+                continue
+            thr = self._limit_thr_for(hist, code)
+            if pct >= thr - 0.2:
+                candidates.add(ds)
+                kline_confirmed.add(ds)
+                rejected.discard(ds)
+
+        for ds in list(candidates):
+            if ds not in pct_map:
+                continue
+            hist = em_name.get(ds) or str((local_by_date.get(ds) or {}).get("name") or name)
+            if self._is_st_like_name(hist):
+                candidates.discard(ds)
+                rejected.add(ds)
+                kline_confirmed.discard(ds)
+                continue
+            thr = self._limit_thr_for(hist, code)
+            if pct_map[ds] < thr - 0.2:
+                candidates.discard(ds)
+                rejected.add(ds)
+                kline_confirmed.discard(ds)
+
+        # 开盘啦日缓存：仅做增强（原因/连板数），不因「池中未命中」剔除 K 线确认日
         reason_map: dict[str, str] = {}
         trusted_board: dict[str, int] = {}
         for ds in list(candidates | rejected):
@@ -1882,7 +1942,8 @@ class MarketService:
                     reason_map[ds] = str(found.get("reason") or found.get("industry") or "")
                 if found.get("board_count"):
                     trusted_board[ds] = max(1, int(found.get("board_count") or 1))
-            else:
+            elif ds not in kline_confirmed:
+                # 非 K 线确认且开盘啦当日池已加载却不在池中 → 剔除
                 candidates.discard(ds)
                 rejected.add(ds)
 
@@ -1893,7 +1954,7 @@ class MarketService:
             if not reason_map.get(ds) and (r.get("reason") or r.get("industry")):
                 reason_map[ds] = str(r.get("reason") or r.get("industry") or "")
 
-        # 对仍缺校验的日期：用同花顺涨停池确认（与开盘啦口径更接近）
+        # 同花顺：补原因/板型；K 线已确认的日期即使池中未命中也保留
         pending = [ds for ds in sorted(candidates, reverse=True) if ds not in reason_map][:40]
         if pending and ths_client is not None:
             from ..collectors.ths import ThsClient
@@ -1922,50 +1983,33 @@ class MarketService:
                     reason = str(row.get("reason_type") or "").strip()
                     board = _parse_board_count(0, row.get("high_days"))
                     return ds, True, reason, board
-                # 成功拉到非空池但没有该股 → 当日未进涨停池
-                if fetched and pool:
+                # 池已确认不含该股：仅对非 K 线确认日剔除
+                if (fetched and pool) or (isinstance(hit, list) and hit):
                     return ds, False, "", 0
-                if isinstance(hit, list) and hit:
-                    return ds, False, "", 0
-                return ds, True, "", 0  # 无法确认时先保留，交给 K 线兜底
+                return ds, True, "", 0
 
             results = await asyncio.gather(*[_probe_ths(ds) for ds in pending])
             for ds, keep, reason, board in results:
-                if not keep:
+                if not keep and ds not in kline_confirmed:
                     candidates.discard(ds)
                     rejected.add(ds)
                     continue
                 if reason:
                     reason_map[ds] = reason
-                if board > trusted_board.get(ds, 1):
+                # 同花顺板数仅作参考：有开盘啦可信板数时不覆盖
+                if board > 0 and ds not in trusted_board:
                     trusted_board[ds] = board
 
-        # K 线兜底：剔除明显未触及普通涨停阈值的日期
-        try:
-            kline = await self.client.fetch_kline(code, limit=500)
-            pct_map = self._kline_pct_map(list(kline.get("bars") or []))
-        except Exception:
-            pct_map = {}
-        for ds in list(candidates):
-            if ds not in pct_map:
-                continue
-            hist = em_name.get(ds) or str((local_by_date.get(ds) or {}).get("name") or name)
-            # ST 日若仍混入，一律丢弃
-            if self._is_st_like_name(hist):
-                candidates.discard(ds)
-                rejected.add(ds)
-                continue
-            thr = self._limit_thr_for(hist, code)
-            if pct_map[ds] < thr - 0.2:
-                candidates.discard(ds)
-                rejected.add(ds)
-
         dates_desc = sorted(candidates, reverse=True)
-        streak = self._compute_board_streaks(list(reversed(dates_desc)))
+        streak = self._compute_board_streaks(
+            list(reversed(dates_desc)),
+            trade_days=trade_days or None,
+        )
         board_map: dict[str, int] = dict(streak)
+        # 开盘啦连板数优先于推算（例如点击日梯队是「首板」则列表也应是首板）
         for ds, bc in trusted_board.items():
-            if ds in board_map and bc > board_map.get(ds, 1):
-                board_map[ds] = bc
+            if ds in board_map:
+                board_map[ds] = max(1, int(bc))
 
         items: list[dict[str, Any]] = []
         for ds in dates_desc:

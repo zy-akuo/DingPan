@@ -292,10 +292,16 @@ export function LadderView({
             <div className="ladder-stocks">
               {g.stocks.map((s) => {
                 const hit = searching && !!hitCodes?.has(s.code);
+                const statusTone =
+                  s.status === "成"
+                    ? " ladder-stock-ok"
+                    : s.status === "炸"
+                      ? " ladder-stock-broken"
+                      : " ladder-stock-fail";
                 return (
                   <div
                     key={`${g.key}-${s.code}-${s.status}`}
-                    className={`ladder-stock${s.risk_tags?.length ? " has-risk" : ""}${hit ? " ladder-stock-hit" : ""}${searching && !hit ? " ladder-stock-dim" : ""}`}
+                    className={`ladder-stock${statusTone}${s.risk_tags?.length ? " has-risk" : ""}${hit ? " ladder-stock-hit" : ""}${searching && !hit ? " ladder-stock-dim" : ""}`}
                   >
                     <div className="ladder-stock-main">
                       <span className="mkt">{s.market || "深"}</span>

@@ -215,6 +215,8 @@ class KaipanlaClient:
         ]
         results = await asyncio.gather(*tasks)
 
+        # 注意：开盘啦 PidType≠真实连板数。例如 PidType=5 会混入 5连与更高板
+        # （新华传媒 9连板曾被塞进 PidType=5）。分组必须以 row 内 board_count 为准。
         ladder: dict[int, list[dict[str, Any]]] = {}
         items: list[dict[str, Any]] = []
         seen: set[str] = set()
@@ -226,11 +228,22 @@ class KaipanlaClient:
                     break
                 continue
             empty_streak = 0
-            ladder[pid] = rows
             for r in rows:
                 if r["code"] in seen:
                     continue
                 seen.add(r["code"])
+                bc = max(1, int(r.get("board_count") or pid or 1))
+                r["board_count"] = bc
+                tip = str(r.get("board_shape") or r.get("zt_stats") or "").strip()
+                # tip 若仍带错误板数前缀，用真实连板覆盖展示文案
+                if not tip or tip == f"{pid}连板" or tip == str(pid):
+                    r["zt_stats"] = "首板" if bc <= 1 else f"{bc}连板"
+                    r["board_shape"] = r["zt_stats"]
+                elif "连板" in tip or tip == "首板":
+                    r["zt_stats"] = tip
+                else:
+                    r["zt_stats"] = tip
+                ladder.setdefault(bc, []).append(r)
                 items.append(r)
 
         concept_map: dict[str, list[dict[str, Any]]] = {}

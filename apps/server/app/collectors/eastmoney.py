@@ -459,9 +459,36 @@ class EastMoneyClient:
                 await asyncio.gather(*[_fill(c) for c in missing])
         return result
 
-    async def fetch_trends(self, code: str) -> dict[str, Any]:
-        """Intraday trend. Prefer today; before open / thin today → previous trading day."""
+    @staticmethod
+    def _norm_day_str(date: str | None) -> str:
+        """Normalize to YYYY-MM-DD; empty if invalid."""
+        raw = (date or "").replace("-", "").strip()
+        if len(raw) == 8 and raw.isdigit():
+            return f"{raw[0:4]}-{raw[4:6]}-{raw[6:8]}"
+        d = (date or "").strip()
+        if len(d) >= 10 and d[4] == "-" and d[7] == "-":
+            return d[:10]
+        return ""
+
+    async def fetch_trends(self, code: str, date: str | None = None) -> dict[str, Any]:
+        """Intraday trend. Prefer today; before open / thin today → previous trading day.
+
+        date: 指定交易日（YYYYMMDD / YYYY-MM-DD）时返回该日分时（历史回溯用）。
+        """
         code = code.zfill(6)
+        day = self._norm_day_str(date)
+        if day:
+            hist = await self._fetch_trends_on_date(code, day)
+            if hist.get("points"):
+                return hist
+            return {
+                "code": code,
+                "name": str(hist.get("name") or ""),
+                "pre_close": float(hist.get("pre_close") or 0),
+                "points": [],
+                "trade_date": day,
+            }
+
         # 1) 东财（可能不稳定）
         em = await self._fetch_trends_eastmoney(code)
         if self._trends_usable(em):
@@ -480,6 +507,126 @@ class EastMoneyClient:
                 return cand
         return {"code": code, "name": "", "pre_close": 0, "points": [], "trade_date": ""}
 
+    async def _fetch_trends_on_date(self, code: str, day: str) -> dict[str, Any]:
+        """按指定交易日取分时：腾讯多日 → 东财 trends2 → 东财 1 分钟 K。"""
+        code = code.zfill(6)
+        day = self._norm_day_str(day)
+        empty = {"code": code, "name": "", "pre_close": 0, "points": [], "trade_date": day}
+        if not day:
+            return empty
+
+        # 1) 腾讯最近约 5 个交易日分时
+        qq = await self._fetch_trends_tencent_days(code, prefer_day=day)
+        if qq.get("points") and self._norm_day_str(str(qq.get("trade_date") or "")) == day:
+            return qq
+
+        # 2) 东财近几日 trends，精确匹配目标日
+        em = await self._fetch_trends_eastmoney(code, prefer_day=day)
+        if em.get("points") and self._norm_day_str(str(em.get("trade_date") or "")) == day:
+            return em
+
+        # 3) 东财 1 分钟 K（任意历史日，上游可用时）
+        minute = await self._fetch_trends_minute_kline(code, day)
+        if minute.get("points"):
+            return minute
+
+        # 带回名称（若有）
+        for cand in (qq, em, minute):
+            if cand and cand.get("name"):
+                empty["name"] = cand["name"]
+                break
+        return empty
+
+    async def _fetch_trends_minute_kline(self, code: str, day: str) -> dict[str, Any]:
+        """用东财 1 分钟 K 拼分时（beg=end=指定日）。"""
+        code = code.zfill(6)
+        day = self._norm_day_str(day)
+        compact = day.replace("-", "")
+        empty = {"code": code, "name": "", "pre_close": 0, "points": [], "trade_date": day}
+        if len(compact) != 8:
+            return empty
+        params = {
+            "secid": to_secid(code),
+            "klt": "1",
+            "fqt": "1",
+            "lmt": "300",
+            "beg": compact,
+            "end": compact,
+            "fields1": "f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13",
+            "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
+            "ut": UT_QUOTE,
+            "rtntype": "6",
+        }
+        data: dict[str, Any] = {}
+        for base in (
+            "https://push2his.eastmoney.com/api/qt/stock/kline/get",
+            "https://push2delay.eastmoney.com/api/qt/stock/kline/get",
+            "https://push2.eastmoney.com/api/qt/stock/kline/get",
+        ):
+            try:
+                data = await self._get(base, params, referer="https://quote.eastmoney.com/")
+                if (data.get("data") or {}).get("klines"):
+                    break
+            except Exception:
+                continue
+        payload = data.get("data") or {}
+        raw_lines = payload.get("klines") or []
+        if not raw_lines:
+            return empty
+
+        points: list[dict[str, Any]] = []
+        cum_vol = 0.0
+        cum_amt = 0.0
+        for line in raw_lines:
+            parts = str(line).split(",")
+            if len(parts) < 6:
+                continue
+            dt = parts[0]
+            time_label = dt.split(" ")[-1] if " " in dt else dt
+            if len(time_label) >= 5:
+                time_label = time_label[:5]
+            try:
+                close = float(parts[2] or parts[1] or 0)
+                vol = float(parts[5] or 0)
+                amt = float(parts[6] or 0) if len(parts) > 6 else 0.0
+            except (TypeError, ValueError):
+                continue
+            cum_vol += vol
+            cum_amt += amt
+            avg = (cum_amt / cum_vol) if cum_vol > 0 else close
+            pt: dict[str, Any] = {
+                "time": time_label,
+                "price": close,
+                "avg": round(avg, 3),
+                "volume": vol,
+            }
+            if amt > 0:
+                pt["amount"] = amt
+            points.append(pt)
+
+        pre_close = 0.0
+        try:
+            daily = await self.fetch_kline(code, limit=10)
+            bars = list(daily.get("bars") or [])
+            for i, b in enumerate(bars):
+                bd = self._norm_day_str(str(b.get("date") or ""))
+                if bd == day and i > 0:
+                    pre_close = float(bars[i - 1].get("close") or 0)
+                    break
+                if bd == day and i == 0 and len(bars) > 1:
+                    # 目标日是窗口第一根时无法取昨收
+                    pass
+        except Exception:
+            pass
+
+        return {
+            "code": code,
+            "name": str(payload.get("name") or ""),
+            "pre_close": pre_close,
+            "points": points,
+            "trade_date": day,
+        }
+
     @staticmethod
     def _trends_usable(payload: dict[str, Any] | None) -> bool:
         if not payload:
@@ -496,8 +643,11 @@ class EastMoneyClient:
             return trade_date == today or trade_date.replace("-", "") == now.strftime("%Y%m%d")
         return False
 
-    async def _fetch_trends_eastmoney(self, code: str) -> dict[str, Any]:
+    async def _fetch_trends_eastmoney(
+        self, code: str, prefer_day: str | None = None
+    ) -> dict[str, Any]:
         code = code.zfill(6)
+        prefer = self._norm_day_str(prefer_day)
         best: dict[str, Any] = {"code": code, "name": "", "pre_close": 0, "points": [], "trade_date": ""}
         for ndays in (1, 2, 5):
             params = {
@@ -531,16 +681,34 @@ class EastMoneyClient:
                 if len(parts) < 5:
                     continue
                 dt = parts[0]
-                day = dt.split(" ")[0] if " " in dt else ""
+                day = self._norm_day_str(dt.split(" ")[0] if " " in dt else dt)
                 time_label = dt.split(" ")[-1] if " " in dt else dt
-                by_day[day].append(
-                    {
-                        "time": time_label,
-                        "price": float(parts[1] or 0),
-                        "avg": float(parts[2] or 0),
-                        "volume": float(parts[5] or 0) if len(parts) > 5 else 0,
-                    }
-                )
+                if len(time_label) >= 5:
+                    time_label = time_label[:5]
+                pt: dict[str, Any] = {
+                    "time": time_label,
+                    "price": float(parts[1] or 0),
+                    "avg": float(parts[2] or 0),
+                    "volume": float(parts[5] or 0) if len(parts) > 5 else 0,
+                }
+                # 东财 trends 常见: ...,量,额,...
+                if len(parts) > 6 and parts[6] not in ("", None):
+                    try:
+                        pt["amount"] = float(parts[6])
+                    except (TypeError, ValueError):
+                        pass
+                if day:
+                    by_day[day].append(pt)
+
+            if prefer and prefer in by_day and by_day[prefer]:
+                return {
+                    "code": code,
+                    "name": str(payload.get("name") or ""),
+                    "pre_close": float(payload.get("preClose") or payload.get("prePrice") or 0),
+                    "points": by_day[prefer],
+                    "trade_date": prefer,
+                }
+
             picked = self._pick_trend_day(by_day)
             if not picked:
                 continue
@@ -558,8 +726,11 @@ class EastMoneyClient:
                 best = cand
         return best
 
-    async def _fetch_trends_tencent_days(self, code: str) -> dict[str, Any]:
+    async def _fetch_trends_tencent_days(
+        self, code: str, prefer_day: str | None = None
+    ) -> dict[str, Any]:
         code = code.zfill(6)
+        prefer = self._norm_day_str(prefer_day)
         sym = self._to_qq_symbol(code)
         headers = dict(HEADERS)
         headers["Referer"] = "https://finance.qq.com/"
@@ -588,7 +759,7 @@ class EastMoneyClient:
             if len(d_raw) == 8 and d_raw.isdigit():
                 day = f"{d_raw[:4]}-{d_raw[4:6]}-{d_raw[6:8]}"
             else:
-                day = d_raw
+                day = self._norm_day_str(d_raw)
             try:
                 pre_by_day[day] = float(item.get("prec") or 0)
             except (TypeError, ValueError):
@@ -619,21 +790,32 @@ class EastMoneyClient:
                 vol_hands = max(0.0, cum_vol - prev_vol)
                 prev_vol = cum_vol
                 avg = (cum_amt / (cum_vol * 100)) if cum_vol > 0 else price
-                points.append(
-                    {
-                        "time": time_label,
-                        "price": price,
-                        "avg": round(avg, 3),
-                        "volume": vol_hands * 100,
-                    }
-                )
-            if points:
+                pt: dict[str, Any] = {
+                    "time": time_label,
+                    "price": price,
+                    "avg": round(avg, 3),
+                    "volume": vol_hands * 100,
+                }
+                if cum_amt > 0:
+                    # 累计额差近似当分钟成交额
+                    pass
+                points.append(pt)
+            if points and day:
                 by_day[day] = points
 
         # 名称可从 qt 取
         qt = (node.get("qt") or {}).get(sym) or []
         if isinstance(qt, list) and len(qt) > 1:
             name = str(qt[1] or "")
+
+        if prefer and prefer in by_day and by_day[prefer]:
+            return {
+                "code": code,
+                "name": name,
+                "pre_close": pre_by_day.get(prefer) or 0,
+                "points": by_day[prefer],
+                "trade_date": prefer,
+            }
 
         picked = self._pick_trend_day(by_day)
         if not picked:
@@ -787,6 +969,7 @@ class EastMoneyClient:
             parts = str(line).split(",")
             if len(parts) < 6:
                 continue
+            # 东财日K: 日期,开,收,高,低,量,额,振幅%,涨跌幅%,涨跌额,换手%
             bars.append(
                 {
                     "date": parts[0],
@@ -795,19 +978,79 @@ class EastMoneyClient:
                     "high": float(parts[3] or 0),
                     "low": float(parts[4] or 0),
                     "volume": float(parts[5] or 0),
+                    "amount": float(parts[6] or 0) if len(parts) > 6 and parts[6] not in ("", "-") else None,
+                    "amplitude": float(parts[7] or 0) if len(parts) > 7 and parts[7] not in ("", "-") else None,
                     "pct": float(parts[8] or 0) if len(parts) > 8 else 0,
+                    "change": float(parts[9] or 0) if len(parts) > 9 and parts[9] not in ("", "-") else None,
+                    "turnover": float(parts[10] or 0) if len(parts) > 10 and parts[10] not in ("", "-") else None,
                 }
             )
+        name = str(payload.get("name") or "")
+        if not bars:
+            data = await self._fetch_kline_sina(code, limit)
+            bars = list(data.get("bars") or [])
+            name = name or str(data.get("name") or "")
         if bars:
             bars = await self._merge_today_bar(code, bars, limit)
-            return {
-                "code": code,
-                "name": str(payload.get("name") or ""),
-                "bars": bars,
-            }
-        data = await self._fetch_kline_sina(code, limit)
-        data["bars"] = await self._merge_today_bar(code, list(data.get("bars") or []), limit)
-        return data
+            bars = await self._enrich_kline_bars(code, bars)
+            return {"code": code, "name": name, "bars": bars}
+        return {"code": code, "name": name, "bars": []}
+
+    async def _enrich_kline_bars(self, code: str, bars: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """补齐涨跌幅/额/振幅/成交额/换手率（东财不可用时用 OHLC+流通市值推算）。"""
+        if not bars:
+            return bars
+
+        prev_close = 0.0
+        for b in bars:
+            o = float(b.get("open") or 0)
+            h = float(b.get("high") or 0)
+            l = float(b.get("low") or 0)
+            c = float(b.get("close") or 0)
+            vol = float(b.get("volume") or 0)
+
+            if (not b.get("pct") or abs(float(b.get("pct") or 0)) < 1e-12) and prev_close > 0 and c > 0:
+                b["pct"] = round((c - prev_close) / prev_close * 100, 2)
+            if b.get("change") is None and prev_close > 0 and c > 0:
+                b["change"] = round(c - prev_close, 2)
+            if b.get("amplitude") is None and prev_close > 0 and h > 0 and l > 0:
+                b["amplitude"] = round((h - l) / prev_close * 100, 2)
+            if (b.get("amount") is None or float(b.get("amount") or 0) <= 0) and vol > 0 and c > 0:
+                typ = (o + h + l + c) / 4.0 if o > 0 and h > 0 and l > 0 else c
+                b["amount"] = round(vol * typ, 2)
+            if c > 0:
+                prev_close = c
+
+        float_shares = 0.0
+        last_close = float(bars[-1].get("close") or 0)
+        float_mv = 0.0
+        try:
+            from ..db import get_fundamentals
+
+            fund = await get_fundamentals(code)
+            if fund:
+                float_mv = float(fund.get("float_mv") or 0)
+        except Exception:
+            pass
+        if float_mv <= 0:
+            try:
+                q = await self.fetch_quote(code)
+                float_mv = float((q or {}).get("float_mv") or 0)
+                if last_close <= 0:
+                    last_close = float((q or {}).get("price") or 0)
+            except Exception:
+                pass
+        if float_mv > 0 and last_close > 0:
+            float_shares = float_mv / last_close
+
+        if float_shares > 0:
+            for b in bars:
+                if b.get("turnover") is not None and float(b.get("turnover") or 0) > 0:
+                    continue
+                vol = float(b.get("volume") or 0)
+                if vol > 0:
+                    b["turnover"] = round(vol / float_shares * 100, 2)
+        return bars
 
     async def _merge_today_bar(
         self, code: str, bars: list[dict[str, Any]], limit: int
@@ -838,7 +1081,11 @@ class EastMoneyClient:
             "high": float(q.get("high") or 0) or price,
             "low": float(q.get("low") or 0) or price,
             "volume": float(q.get("volume") or 0),
+            "amount": None,
+            "amplitude": None,
             "pct": float(q.get("change_pct") or 0),
+            "change": float(q.get("change") or 0) if q.get("change") is not None else None,
+            "turnover": None,
         }
         if bars and str(bars[-1].get("date") or "")[:10] == today:
             bars[-1] = bar
@@ -877,7 +1124,11 @@ class EastMoneyClient:
                     "high": float(row.get("high") or 0),
                     "low": float(row.get("low") or 0),
                     "volume": float(row.get("volume") or 0),
+                    "amount": None,
+                    "amplitude": None,
                     "pct": 0.0,
+                    "change": None,
+                    "turnover": None,
                 }
             )
         return {"code": code, "name": "", "bars": bars}
@@ -912,7 +1163,11 @@ class EastMoneyClient:
                     "high": float(row[3] or 0),
                     "low": float(row[4] or 0),
                     "volume": float(row[5] or 0) if len(row) > 5 else 0,
+                    "amount": None,
+                    "amplitude": None,
                     "pct": 0.0,
+                    "change": None,
+                    "turnover": None,
                 }
             )
         return {"code": code, "name": "", "bars": bars}
