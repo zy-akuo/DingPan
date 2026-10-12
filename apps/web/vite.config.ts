@@ -27,11 +27,11 @@ function quietDevProxyErrors(): Plugin {
   };
 }
 
-function attachQuietProxy(proxy: {
-  on: (event: string, fn: (err: Error) => void) => void;
-}) {
-  proxy.on("error", (err) => {
-    const msg = err instanceof Error ? err.message : String(err);
+/** Vite8 / http-proxy 类型对 error 监听签名过严，运行时仍按标准 EventEmitter 处理 */
+function attachQuietProxy(proxy: { on: (event: string, fn: (...args: unknown[]) => void) => void }) {
+  proxy.on("error", (...args: unknown[]) => {
+    const err = args[0];
+    const msg = err instanceof Error ? err.message : String(err ?? "");
     if (!PROXY_NOISE.test(msg)) {
       console.warn("[proxy]", msg);
     }
@@ -48,12 +48,13 @@ export default defineConfig({
     proxy: {
       "/api": {
         target: "http://127.0.0.1:17831",
-        configure: attachQuietProxy,
+        // 类型断言：规避 Vite ProxyServer 与 @types/http-proxy 的 never 冲突
+        configure: attachQuietProxy as (proxy: unknown) => void,
       },
       "/ws": {
         target: "ws://127.0.0.1:17831",
         ws: true,
-        configure: attachQuietProxy,
+        configure: attachQuietProxy as (proxy: unknown) => void,
       },
     },
   },
