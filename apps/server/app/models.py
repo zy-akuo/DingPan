@@ -163,6 +163,8 @@ class FieldConfig(BaseModel):
     poll_interval_sec: float = 2.5
     # 涨速榜刷新间隔（秒），范围 0.5~10
     speed_poll_interval_sec: float = 1.5
+    # 早盘竞价刷新间隔（秒），范围 0.5~5
+    auction_poll_interval_sec: float = 1.0
     # 连板天梯是否展示封板/回封/炸板时间
     ladder_show_times: bool = True
     # 异动播报（独立于普通涨停/连板/炸板语音）

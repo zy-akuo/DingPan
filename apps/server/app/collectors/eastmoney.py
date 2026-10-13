@@ -1877,6 +1877,338 @@ class EastMoneyClient:
             )
         return out
 
+    async def fetch_auction_limit_pool(self, date: str | None = None) -> list[dict[str, Any]]:
+        """兼容旧名：转调全市场竞价观察池。"""
+        return await self.fetch_auction_market_pool(limit=200)
+
+    async def fetch_em_auction_yizhi(self) -> list[dict[str, Any]]:
+        """东方财富「集合竞价 → 竞价一字板」官方列表。
+
+        接口同 vipmoney 盯盘页：push2dycalc `/api/qt/jjyd/get` + sk=1。
+        口径：9:25 涨停价撮合且存在未匹配额（页面约 9:26 后更新）。
+        字段：f6=未匹配额(元)，f7=竞价涨幅%，f8=撮合价，f11=竞价成交额(元)。
+        """
+        data: dict[str, Any] = {}
+        for base in (
+            "https://push2dycalc.eastmoney.com/api/qt/jjyd/get",
+            "https://push2dycalcl2.eastmoney.com/api/qt/jjyd/get",
+        ):
+            try:
+                data = await self._get(
+                    base,
+                    {
+                        "fltt": "2",
+                        "fields": "f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11",
+                        "sk": "1",
+                        "mt": "109",
+                        "new": "1",
+                        "fid": "f7",
+                        "po": "1",
+                        "pi": "0",
+                        "pz": "100",
+                        "ut": UT_QUOTE,
+                    },
+                    referer="https://vipmoney.eastmoney.com/collect/watchstock/bidding.html",
+                )
+                if (data.get("data") or {}).get("jjyd") is not None:
+                    break
+            except Exception:
+                continue
+        rows = (data.get("data") or {}).get("jjyd") or []
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            code = str(r.get("f2") or "").zfill(6)
+            if not code.isdigit():
+                continue
+            price = float(r.get("f8") or 0)
+            noe = float(r.get("f6") or 0)  # 未匹配额
+            pct = float(r.get("f7") or 0)
+            amount = float(r.get("f11") or 0)  # 竞价撮合额
+            # 未匹配量(手) = 未匹配额 / 价 / 100
+            nol_hands = (noe / price / 100.0) if price > 0 else 0.0
+            mkt = int(r.get("f3") or 0)
+            out.append(
+                {
+                    "code": code,
+                    "name": str(r.get("f4") or code),
+                    "price": price,
+                    "last_price": price,
+                    "auction_pct": pct,
+                    "change_pct": pct,
+                    "amount": amount,
+                    "seal_amount": noe,
+                    "unmatched_vol": nol_hands,
+                    "is_yizhi": noe > 0 and price > 0,
+                    "board_count": 1,
+                    "industry": "",
+                    "concepts": [],
+                    "market": "沪" if mkt == 1 else "深",
+                    "auction_time": str(r.get("f1") or ""),
+                    "float_mv": 0.0,
+                }
+            )
+        out.sort(key=lambda x: float(x.get("seal_amount") or 0), reverse=True)
+        return out
+
+    async def fetch_auction_matched_amounts(
+        self, codes: list[str], *, concurrency: int = 16
+    ) -> dict[str, float]:
+        """盘后回补竞价撮合额：取分时首根(约 09:30)成交额，即集合竞价已匹配额。"""
+        out: dict[str, float] = {}
+        codes = [str(c).zfill(6) for c in codes if c]
+        if not codes:
+            return out
+        sem = asyncio.Semaphore(max(4, min(32, int(concurrency or 16))))
+
+        async def _one(code: str) -> None:
+            async with sem:
+                try:
+                    data = await self._get(
+                        "https://push2his.eastmoney.com/api/qt/stock/trends2/get",
+                        {
+                            "secid": to_secid(code),
+                            "fields1": "f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13",
+                            "fields2": "f51,f52,f53,f54,f55,f56,f57,f58",
+                            "iscr": "0",
+                            "ndays": "1",
+                            "iscca": "1",
+                        },
+                        referer="https://quote.eastmoney.com/",
+                    )
+                except Exception:
+                    return
+                trends = (data.get("data") or {}).get("trends") or []
+                if not trends:
+                    return
+                # "YYYY-MM-DD HH:MM,open,close,high,low,volume,amount,avg"
+                parts = str(trends[0]).split(",")
+                if len(parts) < 7:
+                    return
+                try:
+                    amt = float(parts[6] or 0)
+                except (TypeError, ValueError):
+                    return
+                if amt > 0:
+                    out[code] = amt
+
+        await asyncio.gather(*[_one(c) for c in codes])
+        return out
+
+    async def fetch_auction_market_pool(
+        self, limit: int = 200, *, use_open: bool = False, fast: bool = False
+    ) -> list[dict[str, Any]]:
+        """早盘集合竞价观察池（全 A 候选，禁止涨停池）。
+
+        口径（仅竞价 9:15–9:30，与盘中/收盘无关）：
+        - 默认观察池约 200：涨/跌/额榜合并截断，保证含竞价一字与活跃非一字
+        - 价格/涨幅：竞价中=撮合价；盘后 use_open=开盘价（=9:25 撮合结果）
+        - amount=竞价已匹配成交额（竞价中=盘口累计额；盘后=分时首根额）
+        - seal_amount=竞价未匹配额：触板时记买一额，否则 0
+        - is_yizhi：竞价中=触板且有未匹配；盘后一字以东财 jjyd sk=1 为准
+        fast=True：竞价高频轮询，少翻页以压低单轮耗时。
+        """
+        limit = max(80, min(400, int(limit or 200)))
+        codes: list[str] = []
+        seen: set[str] = set()
+        industry_map: dict[str, str] = {}
+
+        async def _pull(fid: str, po: str, pages: int = 5) -> list[tuple[str, str]]:
+            found: list[tuple[str, str]] = []
+            local_seen: set[str] = set()
+            for pn in range(1, pages + 1):
+                data: dict[str, Any] = {}
+                for base in (
+                    "https://push2.eastmoney.com/api/qt/clist/get",
+                    "https://82.push2.eastmoney.com/api/qt/clist/get",
+                ):
+                    try:
+                        data = await self._get(
+                            base,
+                            {
+                                "pn": str(pn),
+                                "pz": "100",
+                                "po": po,
+                                "np": "1",
+                                "fltt": "2",
+                                "invt": "2",
+                                "fid": fid,
+                                "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048",
+                                "fields": "f12,f13,f14,f2,f3,f6,f17,f100",
+                                "ut": "bd1d9ddb04089700cf9c27f6f7426281",
+                            },
+                            referer="https://quote.eastmoney.com/center/gridlist.html#hs_a_board",
+                        )
+                        if (data.get("data") or {}).get("diff") is not None:
+                            break
+                    except Exception:
+                        continue
+                diff = (data.get("data") or {}).get("diff") or []
+                if isinstance(diff, dict):
+                    rows = [v for v in diff.values() if isinstance(v, dict)]
+                elif isinstance(diff, list):
+                    rows = [v for v in diff if isinstance(v, dict)]
+                else:
+                    rows = []
+                if not rows:
+                    break
+                for r in rows:
+                    code = str(r.get("f12") or "").zfill(6)
+                    if not code.isdigit() or code in local_seen:
+                        continue
+                    local_seen.add(code)
+                    ind = str(r.get("f100") or "").strip()
+                    found.append((code, ind))
+            return found
+
+        # 涨幅 / 跌幅 / 成交额 — 并行拉榜，压低竞价高频单轮耗时
+        if fast:
+            # 200 池：涨幅/跌幅/成交各少翻页，并行拉取
+            pull_jobs = [
+                _pull("f3", "1", 2),
+                _pull("f3", "0", 1),
+                _pull("f6", "1", 2),
+            ]
+        else:
+            pull_jobs = [
+                _pull("f3", "1", 3),
+                _pull("f3", "0", 2),
+                _pull("f6", "1", 3),
+                _pull("f17", "1", 2),
+            ]
+        for chunk in await asyncio.gather(*pull_jobs):
+            for code, ind in chunk:
+                if code in seen:
+                    continue
+                seen.add(code)
+                codes.append(code)
+                if ind:
+                    industry_map[code] = ind
+
+        quotes = await self.fetch_quotes_tencent_batch(codes[: max(limit * 2, 800)])
+        out: list[dict[str, Any]] = []
+        for code in codes:
+            q = quotes.get(code)
+            if not q:
+                continue
+            prev = float(q.get("prev_close") or 0)
+            open_p = float(q.get("open") or 0)
+            last = float(q.get("price") or 0)
+            name = str(q.get("name") or code)
+            if name.startswith(("N", "C", "n", "c")):
+                continue
+            live_pct = float(q.get("change_pct") or 0)
+            if abs(live_pct) < 1e-12 and prev > 0 and last > 0:
+                live_pct = round((last - prev) / prev * 100, 2)
+            float_mv = float(q.get("float_mv") or 0)
+            limit_up = float(q.get("limit_up") or 0)
+
+            if use_open:
+                price = open_p
+                if price <= 0:
+                    continue
+                pct = (
+                    round((price - prev) / prev * 100, 2) if prev > 0 else 0.0
+                )
+                if abs(pct) > 21:
+                    continue
+                seal = 0.0
+                auction_amount = 0.0  # 下面批量回补
+            else:
+                price = last
+                if price <= 0:
+                    continue
+                # 竞价涨幅必须用撮合价/昨收，不用盘后实时涨幅字段混用
+                pct = (
+                    round((price - prev) / prev * 100, 2) if prev > 0 else live_pct
+                )
+                if abs(pct) > 21:
+                    continue
+                at_limit = (
+                    limit_up > 0 and price > 0 and abs(price - limit_up) <= 0.005
+                )
+                # 触板才记未匹配额（买一额）；未触板为 0
+                seal = float(q.get("seal_amount") or 0) if at_limit else 0.0
+                # 竞价中盘口成交额即竞价累计撮合额
+                auction_amount = float(q.get("amount") or 0)
+
+            # 竞价一字 = 涨停价 + 未匹配额>0（盘后 seal=0 → 非一字，由服务层用 9:25 落库未匹配重算）
+            at_limit = (
+                limit_up > 0 and price > 0 and abs(price - limit_up) <= 0.005
+            )
+            if not at_limit:
+                seal = 0.0
+            is_yizhi = bool(at_limit and float(seal or 0) > 0)
+            industry = industry_map.get(code) or ""
+            out.append(
+                {
+                    "code": code,
+                    "name": name,
+                    "price": price,
+                    "last_price": last if last > 0 else price,
+                    "auction_pct": pct,
+                    "change_pct": live_pct,
+                    "amount": auction_amount,
+                    "float_mv": float_mv,
+                    "seal_amount": seal,
+                    "board_count": 1,
+                    "industry": industry,
+                    "concepts": [industry] if industry else [],
+                    "is_yizhi": is_yizhi,
+                    "market": str(q.get("market") or ""),
+                    "prev_close": prev,
+                    "limit_up": limit_up,
+                }
+            )
+
+        # 盘后：按 |竞价涨幅| 先截断再回补竞价撮合额，避免对全市场打分时接口
+        out.sort(
+            key=lambda x: (
+                1 if x.get("is_yizhi") else 0,
+                abs(float(x.get("auction_pct") or 0)),
+                float(x.get("float_mv") or 0),
+            ),
+            reverse=True,
+        )
+        out = out[:limit]
+        if use_open and out:
+            # 只回补：全部竞价一字 + |涨幅| Top80，避免盘后接口被 500 次分时拖死
+            ranked = sorted(
+                out, key=lambda x: abs(float(x.get("auction_pct") or 0)), reverse=True
+            )
+            need: list[str] = []
+            seen_amt: set[str] = set()
+            for x in out:
+                if x.get("is_yizhi"):
+                    c = str(x["code"])
+                    if c not in seen_amt:
+                        seen_amt.add(c)
+                        need.append(c)
+            for x in ranked:
+                c = str(x["code"])
+                if c in seen_amt:
+                    continue
+                seen_amt.add(c)
+                need.append(c)
+                if len(need) >= max(80, len([r for r in out if r.get("is_yizhi")]) + 80):
+                    break
+            amap = await self.fetch_auction_matched_amounts(need, concurrency=24)
+            for x in out:
+                amt = float(amap.get(str(x["code"]), 0) or 0)
+                if amt > 0:
+                    x["amount"] = amt
+
+        out.sort(
+            key=lambda x: (
+                float(x.get("seal_amount") or 0),
+                abs(float(x.get("auction_pct") or 0)),
+                float(x.get("amount") or 0),
+            ),
+            reverse=True,
+        )
+        return out
+
     async def fetch_speed_rank(self, limit: int = 50) -> list[dict[str, Any]]:
         """A-share intraday speed ranking (东财涨速榜, fid=f22)."""
         limit = max(1, min(100, int(limit or 50)))

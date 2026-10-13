@@ -208,7 +208,7 @@ body {
   min-height: calc(100vh - 190px);
 }
 
-/* 终端风：Segmented 更扁、选中更克制 */
+/* ????Segmented ???????? */
 .app .ant-segmented {
   background: color-mix(in srgb, var(--bg) 70%, var(--panel));
   border: 1px solid var(--line);
@@ -1552,7 +1552,7 @@ body {
   cursor: pointer;
 }
 
-/* ——— 避雷啦 ——— */
+/* ??? ??? ??? */
 .risk-panel {
   display: flex;
   flex-direction: column;
@@ -1759,4 +1759,170 @@ body {
   .summary-bar {
     grid-template-columns: repeat(3, 1fr);
   }
+}
+
+/* ===== ??????? ===== */
+.auction-panel {
+  min-height: 420px;
+}
+.auction-toolbar {
+  margin-bottom: 10px;
+}
+
+.auction-wide {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  overflow: auto;
+  background: var(--card-soft);
+}
+.auction-wide-head,
+.auction-wide-row {
+  display: grid;
+  grid-template-columns:
+    minmax(140px, 1.3fr)
+    70px 70px 70px
+    72px
+    88px 72px 88px 96px 64px
+    56px
+    minmax(90px, 1.1fr);
+  gap: 6px;
+  align-items: center;
+  padding: 0 10px;
+  min-width: 1080px;
+  box-sizing: border-box;
+  font-variant-numeric: tabular-nums;
+}
+.auction-wide-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  height: 34px;
+  background: var(--ladder-head-bg);
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.auction-wide-row {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  border: none;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s ease, opacity 0.12s ease;
+}
+.auction-wide-row:hover {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.auction-wide-row.auction-row-hit {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.auction-wide-row.auction-row-dim {
+  opacity: 0.34;
+}
+.auction-wide-section-title {
+  padding: 8px 12px 4px;
+  font-weight: 700;
+  font-size: 13px;
+  border-top: 1px solid var(--line);
+  background: var(--ladder-cell-bg);
+  min-width: 1080px;
+}
+.auction-wide-section:first-of-type .auction-wide-section-title {
+  border-top: none;
+}
+.auction-wide-list {
+  max-height: none;
+}
+.auction-wide .col-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+}
+.auction-wide .col-t,
+.auction-wide .col-num {
+  text-align: right;
+  font-size: 12px;
+  color: var(--muted);
+}
+.auction-wide .col-t915,
+.auction-wide-row .col-t915 {
+  color: #c7921a;
+  font-weight: 600;
+}
+.auction-wide .col-t920,
+.auction-wide-row .col-t920 {
+  color: var(--muted);
+}
+.auction-wide .col-t925,
+.auction-wide-row .col-t925 {
+  color: var(--up);
+  font-weight: 700;
+}
+.auction-wide .col-auction-pct,
+.auction-wide-row .col-auction-pct {
+  font-weight: 700;
+  font-size: 13px;
+}
+.auction-wide-head .col-auction-pct {
+  color: var(--up);
+}
+.auction-wide .col-region,
+.auction-wide .col-concept {
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.auction-name {
+  font-weight: 700;
+  font-size: 13px;
+  color: var(--text);
+  flex: 0 0 auto;
+}
+.auction-chip {
+  flex: 0 0 auto;
+  padding: 0 5px;
+  line-height: 16px;
+  font-size: 11px;
+  border-radius: 3px;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--line) 55%, transparent);
+  white-space: nowrap;
+}
+.auction-chip.board {
+  color: var(--text);
+}
+.auction-chip.yizhi {
+  color: #fff;
+  background: var(--broken, #e11d2e);
+}
+.auction-prev .auction-prev-name {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-weight: 700;
+  color: var(--up);
+}
+.auction-prev .ladder-stock {
+  width: 100%;
+  background: transparent;
+  border: none;
+  border-left: 2px solid transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.auction-prev .ladder-stock.ladder-stock-ok {
+  border-left-color: var(--up);
 }

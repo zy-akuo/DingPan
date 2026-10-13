@@ -176,6 +176,8 @@ export interface FieldConfig {
   poll_interval_sec?: number;
   /** 涨速榜刷新间隔（秒） */
   speed_poll_interval_sec?: number;
+  /** 早盘竞价刷新间隔（秒） */
+  auction_poll_interval_sec?: number;
   /** 连板天梯是否展示封板/回封/炸板时间 */
   ladder_show_times?: boolean;
   /** 异动播报总开关 */

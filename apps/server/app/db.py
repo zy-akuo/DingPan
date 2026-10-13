@@ -58,6 +58,24 @@ CREATE TABLE IF NOT EXISTS risk_events (
     action TEXT NOT NULL,
     UNIQUE(trade_date, code, risk_type, action)
 );
+
+CREATE TABLE IF NOT EXISTS auction_snapshots (
+    trade_date TEXT NOT NULL,
+    slot TEXT NOT NULL,
+    code TEXT NOT NULL,
+    name TEXT,
+    auction_pct REAL,
+    seal_amount REAL,
+    price REAL,
+    board_count INTEGER,
+    concepts TEXT,
+    region TEXT,
+    industry TEXT,
+    is_yizhi INTEGER DEFAULT 0,
+    updated_at TEXT,
+    PRIMARY KEY (trade_date, slot, code)
+);
+CREATE INDEX IF NOT EXISTS idx_auction_date ON auction_snapshots(trade_date);
 """
 
 
@@ -92,6 +110,115 @@ async def init_db() -> None:
 
 def _row_reason(r: dict) -> str:
     return str(r.get("reason") or r.get("industry") or "").strip()
+
+
+async def replace_auction_slot(
+    trade_date: str, slot: str, rows: list[dict], updated_at: str
+) -> None:
+    """Replace one auction slot snapshot for a trade date (0915/0920/0925)."""
+    ds = (trade_date or "").replace("-", "")[:8]
+    sl = (slot or "").strip()
+    if len(ds) != 8 or sl not in ("0915", "0920", "0925"):
+        return
+    async with aiosqlite.connect(settings.db_path) as db:
+        await db.execute(
+            "DELETE FROM auction_snapshots WHERE trade_date=? AND slot=?",
+            (ds, sl),
+        )
+        await db.executemany(
+            """
+            INSERT INTO auction_snapshots(
+                trade_date, slot, code, name, auction_pct, seal_amount, price,
+                board_count, concepts, region, industry, is_yizhi, updated_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            [
+                (
+                    ds,
+                    sl,
+                    str(r.get("code") or "").zfill(6),
+                    str(r.get("name") or ""),
+                    float(r.get("auction_pct") or 0),
+                    float(r.get("seal_amount") or 0),
+                    float(r.get("price") or 0),
+                    int(r.get("board_count") or 1),
+                    json.dumps(r.get("concepts") or [], ensure_ascii=False),
+                    str(r.get("region") or ""),
+                    str(r.get("industry") or ""),
+                    1 if r.get("is_yizhi") else 0,
+                    updated_at,
+                )
+                for r in rows
+                if str(r.get("code") or "").isdigit()
+            ],
+        )
+        await db.commit()
+
+
+async def load_auction_dates(limit: int = 10) -> list[str]:
+    async with aiosqlite.connect(settings.db_path) as db:
+        cur = await db.execute(
+            """
+            SELECT DISTINCT trade_date FROM auction_snapshots
+            ORDER BY trade_date DESC LIMIT ?
+            """,
+            (max(1, int(limit)),),
+        )
+        rows = await cur.fetchall()
+    return [str(r[0]) for r in rows]
+
+
+async def load_auction_day(trade_date: str) -> dict[str, list[dict]]:
+    """Return {slot: [rows...]} for one day."""
+    ds = (trade_date or "").replace("-", "")[:8]
+    out: dict[str, list[dict]] = {"0915": [], "0920": [], "0925": []}
+    if len(ds) != 8:
+        return out
+    async with aiosqlite.connect(settings.db_path) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """
+            SELECT * FROM auction_snapshots WHERE trade_date=? ORDER BY seal_amount DESC
+            """,
+            (ds,),
+        )
+        for r in await cur.fetchall():
+            slot = str(r["slot"] or "")
+            if slot not in out:
+                continue
+            try:
+                concepts = json.loads(r["concepts"] or "[]")
+            except Exception:
+                concepts = []
+            if not isinstance(concepts, list):
+                concepts = []
+            out[slot].append(
+                {
+                    "code": str(r["code"] or "").zfill(6),
+                    "name": str(r["name"] or ""),
+                    "auction_pct": float(r["auction_pct"] or 0),
+                    "seal_amount": float(r["seal_amount"] or 0),
+                    "price": float(r["price"] or 0),
+                    "board_count": int(r["board_count"] or 1),
+                    "concepts": concepts,
+                    "region": str(r["region"] or ""),
+                    "industry": str(r["industry"] or ""),
+                    "is_yizhi": bool(r["is_yizhi"]),
+                    "updated_at": str(r["updated_at"] or ""),
+                }
+            )
+    return out
+
+
+async def purge_old_auction_dates(keep: int = 15) -> None:
+    dates = await load_auction_dates(limit=keep + 50)
+    if len(dates) <= keep:
+        return
+    drop = dates[keep:]
+    async with aiosqlite.connect(settings.db_path) as db:
+        for ds in drop:
+            await db.execute("DELETE FROM auction_snapshots WHERE trade_date=?", (ds,))
+        await db.commit()
 
 
 async def upsert_zt_history(trade_date: str, rows: list[dict]) -> None:
@@ -134,6 +261,32 @@ async def list_zt_history_by_code(code: str) -> list[dict]:
             ORDER BY trade_date DESC
             """,
             (code,),
+        )
+        rows = await cur.fetchall()
+    out: list[dict] = []
+    for r in rows:
+        d = dict(r)
+        if not d.get("reason"):
+            d["reason"] = d.get("industry") or ""
+        out.append(d)
+    return out
+
+
+async def list_zt_history_by_date(trade_date: str) -> list[dict]:
+    """Return local limit-up rows for one trade date."""
+    ds = (trade_date or "").replace("-", "")[:8]
+    if len(ds) != 8:
+        return []
+    async with aiosqlite.connect(settings.db_path) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """
+            SELECT trade_date, code, name, board_count, industry, reason
+            FROM zt_history
+            WHERE trade_date = ?
+            ORDER BY board_count DESC, code ASC
+            """,
+            (ds,),
         )
         rows = await cur.fetchall()
     out: list[dict] = []
@@ -281,13 +434,7 @@ async def calc_year_rates(code: str, lookback_days: int = 250) -> tuple[float | 
     return seal_rate, board_rate
 
 
-async def get_fundamentals(code: str) -> dict | None:
-    async with aiosqlite.connect(settings.db_path) as db:
-        db.row_factory = aiosqlite.Row
-        cur = await db.execute("SELECT * FROM stock_fundamentals WHERE code = ?", (code,))
-        row = await cur.fetchone()
-    if not row:
-        return None
+def _parse_fundamentals_row(row: aiosqlite.Row | dict) -> dict:
     data = dict(row)
     if data.get("concepts"):
         try:
@@ -309,6 +456,44 @@ async def get_fundamentals(code: str) -> dict | None:
     elif "former_names" in data and data["former_names"] is None:
         data["former_names"] = None
     return data
+
+
+async def get_fundamentals(code: str) -> dict | None:
+    async with aiosqlite.connect(settings.db_path) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM stock_fundamentals WHERE code = ?", (code,))
+        row = await cur.fetchone()
+    if not row:
+        return None
+    return _parse_fundamentals_row(row)
+
+
+async def get_fundamentals_batch(codes: list[str]) -> dict[str, dict]:
+    """一次查出多只股票基础信息，供竞价高频 enrich 使用。"""
+    uniq = []
+    seen: set[str] = set()
+    for c in codes:
+        code = str(c or "").zfill(6)
+        if code.isdigit() and code not in seen:
+            seen.add(code)
+            uniq.append(code)
+    if not uniq:
+        return {}
+    out: dict[str, dict] = {}
+    async with aiosqlite.connect(settings.db_path) as db:
+        db.row_factory = aiosqlite.Row
+        # SQLite 变量上限约 999，分块
+        for i in range(0, len(uniq), 400):
+            chunk = uniq[i : i + 400]
+            placeholders = ",".join("?" for _ in chunk)
+            cur = await db.execute(
+                f"SELECT * FROM stock_fundamentals WHERE code IN ({placeholders})",
+                chunk,
+            )
+            for row in await cur.fetchall():
+                data = _parse_fundamentals_row(row)
+                out[str(data.get("code") or "").zfill(6)] = data
+    return out
 
 
 async def upsert_fundamentals(code: str, payload: dict) -> None:

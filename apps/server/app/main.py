@@ -52,11 +52,28 @@ async def lifespan(app: FastAPI):
     fund_task = asyncio.create_task(market_service.fund_worker())
     history_task = asyncio.create_task(market_service.history_backfill_worker(120))
     risk_task = asyncio.create_task(market_service.risk_worker(600))
+    auction_task = asyncio.create_task(market_service.auction_loop())
     cache_task = asyncio.create_task(ttl_cache.cleanup_loop(600))
     yield
-    for t in (poll_task, alert_task, fund_task, history_task, risk_task, cache_task):
+    for t in (
+        poll_task,
+        alert_task,
+        fund_task,
+        history_task,
+        risk_task,
+        auction_task,
+        cache_task,
+    ):
         t.cancel()
-    for t in (poll_task, alert_task, fund_task, history_task, risk_task, cache_task):
+    for t in (
+        poll_task,
+        alert_task,
+        fund_task,
+        history_task,
+        risk_task,
+        auction_task,
+        cache_task,
+    ):
         try:
             await t
         except asyncio.CancelledError:
@@ -108,6 +125,35 @@ async def market_speed(limit: int = 50):
         "items": [s.model_dump() for s in items],
         "updated_at": datetime.now().isoformat(timespec="seconds"),
     }
+
+
+@app.get("/api/auction/board")
+async def auction_board(days: int = 3, date: str = ""):
+    """单日宽表集合竞价（可切近 N 日）。"""
+    try:
+        return await market_service.get_auction_board(days=days, date=date or None)
+    except Exception as e:
+        return {
+            "phase": "idle",
+            "dates": [],
+            "column": {"yizhi_items": [], "other_items": [], "items": []},
+            "error": str(e),
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+
+
+@app.get("/api/auction/prev-ladder")
+async def auction_prev_ladder():
+    """昨日涨停股今日竞价涨幅（按连板分组）。"""
+    try:
+        return await market_service.get_auction_prev_ladder()
+    except Exception as e:
+        return {
+            "phase": "idle",
+            "groups": [],
+            "error": str(e),
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
 
 
 @app.get("/api/market/history")
@@ -294,6 +340,12 @@ async def put_fields(fields: FieldConfig):
         )
     except Exception:
         fields.alert_speech_interval_sec = 1.0
+    try:
+        fields.auction_poll_interval_sec = max(
+            1.0, min(5.0, float(fields.auction_poll_interval_sec or 1.0))
+        )
+    except Exception:
+        fields.auction_poll_interval_sec = 1.0
     cfg = update_field_config(fields)
     return cfg.model_dump()
 

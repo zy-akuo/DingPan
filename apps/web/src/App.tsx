@@ -19,6 +19,7 @@ import { StockChartModal } from "./components/StockChartModal";
 import { StockDetailDrawer } from "./components/StockDetailDrawer";
 import { SummaryBar } from "./components/SummaryBar";
 import { AlertBroadcastPanel } from "./components/AlertBroadcastPanel";
+import { AuctionPanel } from "./components/AuctionPanel";
 import { WatchlistPanel } from "./components/WatchlistPanel";
 import { useMarketSocket } from "./hooks/useMarketSocket";
 import { useSpeech } from "./hooks/useSpeech";
@@ -58,13 +59,22 @@ const defaultFields: FieldConfig = {
   speech_types: ["zt", "lb", "zb"],
   poll_interval_sec: 2.5,
   speed_poll_interval_sec: 1.5,
+  auction_poll_interval_sec: 1.0,
   ladder_show_times: true,
   alert_speech_enabled: true,
   alert_speech_types: [...DEFAULT_ALERT_SPEECH_TYPES],
   alert_speech_interval_sec: 1,
 };
 
-type MainTab = "monitor" | "ladder" | "watch" | "alert" | "speed" | "history" | "risk";
+type MainTab =
+  | "monitor"
+  | "ladder"
+  | "watch"
+  | "alert"
+  | "speed"
+  | "history"
+  | "risk"
+  | "auction";
 
 function findPoolTab(
   snapshot: { zt: StockItem[]; lb: StockItem[]; zb: StockItem[]; dt: StockItem[] },
@@ -293,6 +303,7 @@ export default function App() {
                 { label: "重点观察", value: "watch" },
                 { label: "异动播报", value: "alert" },
                 { label: "涨速榜", value: "speed" },
+                { label: "早盘竞价", value: "auction" },
                 { label: "历史回溯", value: "history" },
               ]}
             />
@@ -395,6 +406,13 @@ export default function App() {
               onRowClick={openDetail}
               selectedCode={selectedCode}
               pollSec={fields.speed_poll_interval_sec ?? 1.5}
+            />
+          </section>
+        ) : mainTab === "auction" ? (
+          <section className="panel">
+            <AuctionPanel
+              pollSec={fields.auction_poll_interval_sec ?? 1.0}
+              onOpenDetail={openDetailFromLadder}
             />
           </section>
         ) : (

@@ -25,6 +25,7 @@ export function SettingsDrawer({
 
   const pollSec = draft.poll_interval_sec ?? 2.5;
   const speedSec = draft.speed_poll_interval_sec ?? 1.5;
+  const auctionSec = draft.auction_poll_interval_sec ?? 1;
   const alertSec = draft.alert_speech_interval_sec ?? 1;
   const alertTypes = draft.alert_speech_types ?? [...DEFAULT_ALERT_SPEECH_TYPES];
   const alertEnabled = draft.alert_speech_enabled !== false;
@@ -58,6 +59,10 @@ export function SettingsDrawer({
                   speed_poll_interval_sec: Math.max(
                     0.5,
                     Math.min(10, Number(draft.speed_poll_interval_sec) || 1.5),
+                  ),
+                  auction_poll_interval_sec: Math.max(
+                    1,
+                    Math.min(5, Number(draft.auction_poll_interval_sec) || 1),
                   ),
                   alert_speech_interval_sec: Math.max(
                     0.5,
@@ -115,9 +120,26 @@ export function SettingsDrawer({
               style={{ width: 140 }}
             />
           </Space>
+          <Space align="center">
+            <span>早盘竞价刷新</span>
+            <InputNumber
+              min={1}
+              max={5}
+              step={0.5}
+              value={auctionSec}
+              onChange={(v) =>
+                setDraft({
+                  ...draft,
+                  auction_poll_interval_sec: typeof v === "number" ? v : 1,
+                })
+              }
+              addonAfter="秒"
+              style={{ width: 140 }}
+            />
+          </Space>
         </Space>
         <div style={{ marginTop: 8, color: "var(--muted)", fontSize: 12, lineHeight: 1.5 }}>
-          盘中轮询建议 2～5 秒；涨速榜默认 1.5 秒。过小会增加上游压力。保存后下一轮生效。
+          盘中轮询建议 2～5 秒；涨速榜默认 1.5 秒；早盘竞价观察池约 200 只、默认 1 秒刷新（贴近实际采集耗时，仅 9:15–9:30 定时拉，9:25 后数据固定只拉一次）。保存后下一轮生效。
         </div>
       </div>
 

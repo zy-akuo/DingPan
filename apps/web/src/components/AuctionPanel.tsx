@@ -1,0 +1,732 @@
+import { SearchOutlined } from "@ant-design/icons";
+import { Empty, Input, Segmented, Select, Space, Spin, Tabs, Tag } from "antd";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { AuctionVirtualList } from "./AuctionVirtualList";
+import { collectRegions } from "./MonitorFilterBar";
+import { matchNameOrInitials } from "../lib/stockMatch";
+import type { StockItem } from "../types";
+import { formatMoney, formatPct } from "../types";
+
+const BOARD_ROW_H = 40;
+const LIST_MAX_H = 560;
+
+type AuctionStock = {
+  code: string;
+  name: string;
+  market?: string;
+  board_count?: number;
+  board_tag?: string;
+  concepts?: string[];
+  region?: string;
+  industry?: string;
+  is_yizhi?: boolean;
+  auction_pct?: number | null;
+  change_pct?: number | null;
+  amount?: number | null;
+  float_mv?: number | null;
+  free_float_mv?: number | null;
+  price?: number | null;
+  price_0915?: number | null;
+  price_0920?: number | null;
+  price_0925?: number | null;
+  seal_0915?: number | null;
+  seal_0920?: number | null;
+  seal_0925?: number | null;
+  pct_0915?: number | null;
+  pct_0920?: number | null;
+  pct_0925?: number | null;
+};
+
+type DateOption = { date: string; date_label: string };
+
+type BoardColumn = {
+  date: string;
+  date_label: string;
+  yizhi_count?: number;
+  other_count?: number;
+  seal_total?: number;
+  yizhi_items?: AuctionStock[];
+  other_items?: AuctionStock[];
+  items?: AuctionStock[];
+};
+
+type BoardPayload = {
+  phase?: string;
+  active_slot?: string | null;
+  trade_date?: string;
+  selected_date?: string;
+  updated_at?: string;
+  dates?: DateOption[];
+  column?: BoardColumn;
+};
+
+type PrevStock = {
+  code: string;
+  name: string;
+  market?: string;
+  board_count?: number;
+  board_tag?: string;
+  auction_pct?: number | null;
+  suspended?: boolean;
+  region?: string;
+  industry?: string;
+  concepts?: string[];
+  reason?: string;
+};
+
+type PrevGroup = {
+  key: string;
+  label: string;
+  board_count: number;
+  count: number;
+  promotion_rate?: string;
+  stocks: PrevStock[];
+};
+
+type PrevPayload = {
+  phase?: string;
+  prev_date?: string;
+  updated_at?: string;
+  groups?: PrevGroup[];
+};
+
+/** 竞价未匹配额：≥1亿用「x.xx亿」(去尾0)，否则「xxxx万」；无数据不回退股价 */
+function formatSealAmount(v: number | null | undefined): string {
+  if (v == null || Number.isNaN(Number(v)) || Number(v) <= 0) return "—";
+  const n = Number(v);
+  const abs = Math.abs(n);
+  if (abs >= 1e8) {
+    const yi = n / 1e8;
+    const s = yi.toFixed(2).replace(/\.?0+$/, "");
+    return `${s}亿`;
+  }
+  if (abs >= 1e4) return `${Math.round(n / 1e4)}万`;
+  return `${Math.round(n)}`;
+}
+
+function pctClass(v?: number | null): string {
+  if (v == null || Number.isNaN(v)) return "";
+  if (v > 0) return "up";
+  if (v < 0) return "down";
+  return "";
+}
+
+function pctText(v?: number | null): string {
+  if (v == null || Number.isNaN(v)) return "—";
+  return formatPct(v);
+}
+
+function mvText(v?: number | null): string {
+  if (v == null || Number.isNaN(Number(v)) || Number(v) <= 0) return "—";
+  return formatMoney(Number(v));
+}
+
+function priceText(v?: number | null): string {
+  if (v == null || Number.isNaN(Number(v)) || Number(v) <= 0) return "—";
+  return Number(v).toFixed(2);
+}
+
+function contentSignature(data: unknown): string {
+  if (data == null || typeof data !== "object") return JSON.stringify(data);
+  const obj = data as Record<string, unknown>;
+  const { updated_at: _u, ...rest } = obj;
+  return JSON.stringify(rest);
+}
+
+function isLocalAuctionWindow(now = new Date()): boolean {
+  const day = now.getDay();
+  if (day === 0 || day === 6) return false;
+  const mins = now.getHours() * 60 + now.getMinutes();
+  return mins >= 9 * 60 + 14 && mins < 9 * 60 + 30;
+}
+
+function toStockItem(s: {
+  code: string;
+  name: string;
+  market?: string;
+  price?: number | null;
+  change_pct?: number | null;
+  auction_pct?: number | null;
+  amount?: number | null;
+  float_mv?: number | null;
+  free_float_mv?: number | null;
+  concepts?: string[];
+  region?: string;
+  industry?: string;
+  board_count?: number;
+  board_tag?: string;
+}): StockItem {
+  return {
+    code: s.code,
+    name: s.name,
+    market: s.market || "深",
+    price: Number(s.price || 0),
+    change_pct: Number(s.change_pct ?? s.auction_pct ?? 0),
+    amount: Number(s.amount || 0),
+    volume: 0,
+    float_mv: Number(s.float_mv || 0),
+    total_mv: 0,
+    turnover: 0,
+    seal_amount: 0,
+    first_seal_time: "",
+    last_seal_time: "",
+    board_count: Number(s.board_count || 1),
+    open_times: 0,
+    industry: s.industry || "",
+    concepts: s.concepts || [],
+    zt_stats: "",
+    status: "封",
+    board_tag: s.board_tag || "",
+    region: s.region || "",
+    free_float_mv:
+      s.free_float_mv == null || Number.isNaN(Number(s.free_float_mv))
+        ? null
+        : Number(s.free_float_mv),
+    top10_holder_pct: null,
+    year_seal_rate: null,
+    year_board_rate: null,
+  };
+}
+
+function useStablePoll<T extends { phase?: string }>(
+  fetcher: () => Promise<T>,
+  intervalSec: number,
+  enabled: boolean,
+  depsKey = "",
+): { data: T | null; loading: boolean; updatedAt: string } {
+  const [data, setData] = useState<T | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [updatedAt, setUpdatedAt] = useState("");
+  const [inAuctionWindow, setInAuctionWindow] = useState(() =>
+    isLocalAuctionWindow(),
+  );
+  const seq = useRef(0);
+  const busy = useRef(false);
+  const timer = useRef<number | null>(null);
+  const frozen = useRef<string>("");
+  const fetcherRef = useRef(fetcher);
+  fetcherRef.current = fetcher;
+
+  const shouldPoll = data?.phase === "auction" || inAuctionWindow;
+
+  const refresh = useCallback(async () => {
+    if (busy.current) return;
+    busy.current = true;
+    const my = ++seq.current;
+    try {
+      const next = await fetcherRef.current();
+      if (my !== seq.current) return;
+      const sig = contentSignature(next);
+      if (sig !== frozen.current) {
+        frozen.current = sig;
+        setData(next);
+      }
+      const ts =
+        next && typeof next === "object" && "updated_at" in (next as object)
+          ? String((next as { updated_at?: string }).updated_at || "")
+          : "";
+      if (ts) setUpdatedAt(ts);
+    } catch {
+      /* keep */
+    } finally {
+      if (my === seq.current) setLoading(false);
+      busy.current = false;
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!enabled) return;
+    const tick = () => setInAuctionWindow(isLocalAuctionWindow());
+    tick();
+    const id = window.setInterval(tick, 15_000);
+    return () => window.clearInterval(id);
+  }, [enabled]);
+
+  useEffect(() => {
+    if (!enabled) {
+      if (timer.current) {
+        window.clearInterval(timer.current);
+        timer.current = null;
+      }
+      return;
+    }
+    seq.current += 1;
+    frozen.current = "";
+    setLoading(true);
+    void refresh();
+    if (timer.current) {
+      window.clearInterval(timer.current);
+      timer.current = null;
+    }
+    if (!shouldPoll) {
+      return () => {
+        seq.current += 1;
+        busy.current = false;
+      };
+    }
+    const ms = Math.max(1000, Math.round((intervalSec || 1.0) * 1000));
+    timer.current = window.setInterval(() => void refresh(), ms);
+    return () => {
+      if (timer.current) {
+        window.clearInterval(timer.current);
+        timer.current = null;
+      }
+      seq.current += 1;
+      busy.current = false;
+    };
+  }, [enabled, intervalSec, refresh, shouldPoll, depsKey]);
+
+  return { data, loading, updatedAt };
+}
+
+function AuctionTableHeader() {
+  return (
+    <div className="auction-wide-head">
+      <span className="col-name">名称</span>
+      <span className="col-t col-t915">9:15</span>
+      <span className="col-t col-t920">9:20</span>
+      <span className="col-t col-t925">9:25</span>
+      <span className="col-num col-auction-pct">竞价涨幅</span>
+      <span className="col-num">竞价成交额</span>
+      <span className="col-num">实时涨幅</span>
+      <span className="col-num">流通市值</span>
+      <span className="col-num">自由流通市值</span>
+      <span className="col-num">股价</span>
+      <span className="col-region">地域</span>
+      <span className="col-concept">概念</span>
+    </div>
+  );
+}
+
+function AuctionTableRow({
+  stock,
+  searching,
+  hit,
+  isToday,
+  onOpen,
+}: {
+  stock: AuctionStock;
+  searching: boolean;
+  hit: boolean;
+  isToday: boolean;
+  onOpen?: (s: StockItem) => void;
+}) {
+  const dim = searching && !hit;
+  const concept = (stock.concepts || []).filter(Boolean).join("、") || "—";
+  const region = (stock.region || "").trim() || "—";
+  return (
+    <button
+      type="button"
+      className={`auction-wide-row${hit ? " auction-row-hit" : ""}${dim ? " auction-row-dim" : ""}`}
+      onClick={() => onOpen?.(toStockItem(stock))}
+    >
+      <span className="col-name">
+        <span className="auction-name">{stock.name}</span>
+        {stock.board_tag ? (
+          <span className="auction-chip board">{stock.board_tag}</span>
+        ) : null}
+        {stock.is_yizhi ? <span className="auction-chip yizhi">一字</span> : null}
+      </span>
+      <span className="col-t col-t915">
+        {formatSealAmount(stock.is_yizhi ? stock.seal_0915 : null)}
+      </span>
+      <span className="col-t col-t920">
+        {formatSealAmount(stock.is_yizhi ? stock.seal_0920 : null)}
+      </span>
+      <span className="col-t col-t925">
+        {formatSealAmount(stock.is_yizhi ? stock.seal_0925 : null)}
+      </span>
+      <span className={`col-num col-auction-pct ${pctClass(stock.auction_pct)}`}>
+        {pctText(stock.auction_pct)}
+      </span>
+      <span className="col-num">{mvText(stock.amount)}</span>
+      <span className={`col-num ${pctClass(isToday ? stock.change_pct : null)}`}>
+        {isToday ? pctText(stock.change_pct) : "—"}
+      </span>
+      <span className="col-num">{mvText(stock.float_mv)}</span>
+      <span className="col-num">{mvText(stock.free_float_mv)}</span>
+      <span className="col-num">{priceText(stock.price)}</span>
+      <span className="col-region" title={region}>
+        {region}
+      </span>
+      <span className="col-concept" title={concept}>
+        {concept}
+      </span>
+    </button>
+  );
+}
+
+function AuctionBoardTab({
+  pollSec,
+  enabled,
+  onOpenDetail,
+}: {
+  pollSec: number;
+  enabled: boolean;
+  onOpenDetail?: (s: StockItem) => void;
+}) {
+  const [kw, setKw] = useState("");
+  const [region, setRegion] = useState("");
+  const [selectedDate, setSelectedDate] = useState("");
+
+  const fetcher = useCallback(async () => {
+    const q = selectedDate
+      ? `?days=3&date=${encodeURIComponent(selectedDate)}`
+      : "?days=3";
+    const res = await fetch(`/api/auction/board${q}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return (await res.json()) as BoardPayload;
+  }, [selectedDate]);
+
+  const { data, loading, updatedAt } = useStablePoll(
+    fetcher,
+    pollSec,
+    enabled,
+    selectedDate,
+  );
+
+  useEffect(() => {
+    if (!selectedDate && data?.selected_date) {
+      setSelectedDate(data.selected_date);
+    } else if (!selectedDate && data?.trade_date) {
+      setSelectedDate(data.trade_date);
+    }
+  }, [data?.selected_date, data?.trade_date, selectedDate]);
+
+  const dateOptions = data?.dates || [];
+  const col = data?.column;
+  const isToday = (data?.selected_date || selectedDate) === data?.trade_date;
+
+  const yizhi = col?.yizhi_items || [];
+  const other = col?.other_items || [];
+
+  const regions = useMemo(() => {
+    const rows: { region?: string }[] = [];
+    for (const s of yizhi) rows.push(s);
+    for (const s of other) rows.push(s);
+    return collectRegions(rows as StockItem[]);
+  }, [yizhi, other]);
+
+  const hitCodes = useMemo(() => {
+    const q = kw.trim();
+    const r = region.trim();
+    if (!q && !r) return null;
+    const set = new Set<string>();
+    for (const s of [...yizhi, ...other]) {
+      if (q && !matchNameOrInitials(s.name || "", q)) continue;
+      if (r && !(s.region || "").includes(r)) continue;
+      set.add(s.code);
+    }
+    return set;
+  }, [yizhi, other, kw, region]);
+
+  const searching = !!(kw.trim() || region.trim());
+
+  const renderSection = (title: string, items: AuctionStock[]) => (
+    <div className="auction-wide-section" key={title}>
+      <div className="auction-wide-section-title">
+        {title}
+        <span className="muted">（{items.length}）</span>
+      </div>
+      {items.length ? (
+        <AuctionVirtualList
+          className="auction-wide-list"
+          items={items}
+          rowHeight={BOARD_ROW_H}
+          maxHeight={Math.min(LIST_MAX_H, Math.max(160, items.length * BOARD_ROW_H + 8))}
+          getKey={(s) => s.code}
+          renderRow={(s) => (
+            <AuctionTableRow
+              stock={s}
+              searching={searching}
+              hit={searching && !!hitCodes?.has(s.code)}
+              isToday={!!isToday}
+              onOpen={onOpenDetail}
+            />
+          )}
+        />
+      ) : (
+        <div className="muted" style={{ padding: "8px 12px" }}>
+          暂无
+        </div>
+      )}
+    </div>
+  );
+
+  return (
+    <div className="auction-board">
+      <div className="auction-toolbar">
+        <Space wrap>
+          {dateOptions.length ? (
+            <Segmented
+              size="small"
+              value={selectedDate || dateOptions[0]?.date}
+              onChange={(v) => setSelectedDate(String(v))}
+              options={dateOptions.map((d) => ({
+                label: d.date_label,
+                value: d.date,
+              }))}
+            />
+          ) : null}
+          <Input
+            allowClear
+            prefix={<SearchOutlined />}
+            placeholder="名称 / 首字母"
+            value={kw}
+            onChange={(e) => setKw(e.target.value)}
+            style={{ width: 160 }}
+          />
+          <Select
+            allowClear
+            showSearch
+            placeholder="地域"
+            value={region || undefined}
+            onChange={(v) => setRegion(v || "")}
+            options={regions.map((x) => ({ label: x, value: x }))}
+            optionFilterProp="label"
+            style={{ width: 120 }}
+          />
+          {searching ? (
+            <span className="filter-count">高亮 {hitCodes?.size ?? 0} 只</span>
+          ) : null}
+          {col ? (
+            <span className="muted">
+              一字 {col.yizhi_count ?? yizhi.length} | 封单{" "}
+              {formatMoney(col.seal_total || 0)}
+            </span>
+          ) : null}
+          {updatedAt ? (
+            <span className="muted">更新 {updatedAt.slice(11, 19)}</span>
+          ) : null}
+          {data?.phase === "auction" ? (
+            <Tag color="red">竞价中 {data.active_slot || ""}</Tag>
+          ) : (
+            <Tag>非竞价时段</Tag>
+          )}
+        </Space>
+      </div>
+
+      {loading && !col ? (
+        <div className="muted" style={{ padding: 24 }}>
+          <Spin size="small" /> 加载竞价数据…
+        </div>
+      ) : !yizhi.length && !other.length ? (
+        <Empty description="暂无竞价数据（竞价时段自动采集 9:15/9:20/9:25）" />
+      ) : (
+        <div className="auction-wide">
+          <AuctionTableHeader />
+          {renderSection("一字板", yizhi)}
+          {renderSection("非一字板", other)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AuctionPrevTab({
+  pollSec,
+  enabled,
+  onOpenDetail,
+}: {
+  pollSec: number;
+  enabled: boolean;
+  onOpenDetail?: (s: StockItem) => void;
+}) {
+  const [kw, setKw] = useState("");
+  const [region, setRegion] = useState("");
+
+  const fetcher = useCallback(async () => {
+    const res = await fetch("/api/auction/prev-ladder");
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return (await res.json()) as PrevPayload;
+  }, []);
+
+  const { data, loading, updatedAt } = useStablePoll(fetcher, pollSec, enabled);
+  const groups = data?.groups || [];
+
+  const regions = useMemo(() => {
+    const rows: { region?: string }[] = [];
+    for (const g of groups) for (const s of g.stocks || []) rows.push(s);
+    return collectRegions(rows as StockItem[]);
+  }, [groups]);
+
+  const hitCodes = useMemo(() => {
+    const q = kw.trim();
+    const r = region.trim();
+    if (!q && !r) return null;
+    const set = new Set<string>();
+    for (const g of groups) {
+      for (const s of g.stocks || []) {
+        if (q && !matchNameOrInitials(s.name || "", q)) continue;
+        if (r && !(s.region || "").includes(r)) continue;
+        set.add(s.code);
+      }
+    }
+    return set;
+  }, [groups, kw, region]);
+
+  const searching = !!(kw.trim() || region.trim());
+  const dateLabel = data?.prev_date
+    ? data.prev_date.length === 8
+      ? `${data.prev_date.slice(0, 4)}-${data.prev_date.slice(4, 6)}-${data.prev_date.slice(6, 8)}`
+      : data.prev_date
+    : "—";
+
+  return (
+    <div className="auction-prev ladder">
+      <div className="ladder-toolbar auction-toolbar">
+        <Input
+          allowClear
+          prefix={<SearchOutlined />}
+          placeholder="名称 / 首字母模糊搜索"
+          value={kw}
+          onChange={(e) => setKw(e.target.value)}
+          style={{ maxWidth: 280 }}
+        />
+        <Space size={4} className="filter-item">
+          <span className="filter-label">地域</span>
+          <Select
+            allowClear
+            showSearch
+            placeholder="全部"
+            value={region || undefined}
+            onChange={(v) => setRegion(v || "")}
+            options={regions.map((x) => ({ label: x, value: x }))}
+            optionFilterProp="label"
+            style={{ width: 120 }}
+          />
+        </Space>
+        {searching ? (
+          <span className="filter-count">高亮 {hitCodes?.size ?? 0} 只</span>
+        ) : null}
+        {updatedAt ? (
+          <span className="muted">更新 {updatedAt.slice(11, 19)}</span>
+        ) : null}
+        {data?.phase === "auction" ? (
+          <Tag color="red">竞价中</Tag>
+        ) : (
+          <Tag>竞价涨幅=开盘价涨幅</Tag>
+        )}
+      </div>
+
+      {loading && !groups.length ? (
+        <div className="muted" style={{ padding: 24 }}>
+          <Spin size="small" /> 加载昨日连板竞价…
+        </div>
+      ) : !groups.length ? (
+        <Empty description="暂无昨日涨停数据" />
+      ) : (
+        <>
+          <h2 className="ladder-title">【{dateLabel}】昨日涨停 · 今日竞价</h2>
+          <div className="ladder-table">
+            <div className="ladder-head">
+              <div>连板</div>
+              <div>竞价晋级</div>
+              <div>股票（竞价涨幅）</div>
+            </div>
+            {groups.map((g) => (
+              <div key={g.key} className="ladder-row">
+                <div className="ladder-progress">{g.label}</div>
+                <div className="ladder-rate">
+                  {g.promotion_rate || `${g.count}只`}
+                </div>
+                <div className="ladder-stocks">
+                  {(g.stocks || []).map((s) => {
+                    const hit = searching && !!hitCodes?.has(s.code);
+                    const dim = searching && !hit;
+                    const pct = s.auction_pct;
+                    const nearLimit =
+                      pct != null && !Number.isNaN(pct) && pct >= 9.5;
+                    return (
+                      <button
+                        type="button"
+                        key={s.code}
+                        className={`ladder-stock${nearLimit ? " ladder-stock-ok" : ""}${hit ? " ladder-stock-hit" : ""}${dim ? " ladder-stock-dim" : ""}`}
+                        onClick={() =>
+                          onOpenDetail?.(
+                            toStockItem({
+                              ...s,
+                              change_pct: s.auction_pct,
+                              industry: s.industry || s.reason,
+                            }),
+                          )
+                        }
+                      >
+                        <div className="ladder-stock-main">
+                          <span className="mkt">{s.market || "深"}</span>
+                          <span className="nm-link auction-prev-name">
+                            {s.name}
+                          </span>
+                          <span className={`pct ${pctClass(pct)}`}>
+                            {pct == null ? "[ — ]" : `[ ${pctText(pct)} ]`}
+                          </span>
+                          <span className="concept">
+                            {s.concepts?.[0] || s.industry || ""}
+                          </span>
+                          {s.region ? (
+                            <span className="region">{s.region}</span>
+                          ) : null}
+                          {s.suspended ? (
+                            <span className="region">停牌</span>
+                          ) : null}
+                        </div>
+                      </button>
+                    );
+                  })}
+                  {!g.stocks?.length ? (
+                    <span className="muted">暂无</span>
+                  ) : null}
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+export function AuctionPanel({
+  pollSec = 1.0,
+  onOpenDetail,
+}: {
+  pollSec?: number;
+  onOpenDetail?: (s: StockItem) => void;
+}) {
+  const [tab, setTab] = useState("board");
+  const sec = Math.max(1.0, Math.min(5, Number(pollSec) || 1.0));
+
+  return (
+    <div className="auction-panel">
+      <Tabs
+        activeKey={tab}
+        onChange={setTab}
+        destroyInactiveTabPane={false}
+        items={[
+          {
+            key: "board",
+            label: "早盘竞价",
+            children: (
+              <AuctionBoardTab
+                pollSec={sec}
+                enabled={tab === "board"}
+                onOpenDetail={onOpenDetail}
+              />
+            ),
+          },
+          {
+            key: "prev",
+            label: "昨日连板竞价",
+            children: (
+              <AuctionPrevTab
+                pollSec={sec}
+                enabled={tab === "prev"}
+                onOpenDetail={onOpenDetail}
+              />
+            ),
+          },
+        ]}
+      />
+    </div>
+  );
+}

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from typing import Any
 
 from ..collectors import EastMoneyClient, today_yyyymmdd
@@ -10,12 +10,18 @@ from ..db import (
     calc_year_rates,
     count_history_dates,
     get_fundamentals,
+    get_fundamentals_batch,
     get_meta,
     delete_zt_history_dates,
     list_zt_history_by_code,
+    list_zt_history_by_date,
+    load_auction_dates,
+    load_auction_day,
     load_prev_risk_trade_date,
     load_risk_events,
     load_risk_snapshot,
+    purge_old_auction_dates,
+    replace_auction_slot,
     replace_risk_snapshot,
     search_local_stocks,
     set_meta,
@@ -164,6 +170,16 @@ class MarketService:
         # 异动播报状态：code -> {sealed, touched, seal_peak, seal, amount, name, board, industry}
         self._alert_state: dict[str, dict[str, Any]] = {}
         self._alert_trade_date: str = ""
+        # 早盘竞价
+        self._auction_inited = True
+        self._auction_live: list[dict[str, Any]] = []
+        self._auction_live_at: str = ""
+        self._auction_written: set[str] = set()
+        self._auction_lock = asyncio.Lock()
+        # 短 TTL 响应缓存：避免 0.5s 前端轮询反复打库/打 fundamentals 导致抖动
+        self._auction_board_cache: tuple[float, dict[str, Any]] | None = None
+        self._auction_prev_cache: tuple[float, dict[str, Any]] | None = None
+        self._auction_region_cache: dict[str, str] = {}
 
     def subscribe(self) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue(maxsize=4)
@@ -2381,6 +2397,900 @@ class MarketService:
             except Exception:
                 pass
             await asyncio.sleep(3600)
+
+    # ---------- 早盘竞价 ----------
+    def __init_auction_state(self) -> None:
+        if getattr(self, "_auction_inited", False):
+            return
+        self._auction_inited = True
+        self._auction_live: list[dict[str, Any]] = []
+        self._auction_live_at: str = ""
+        self._auction_written: set[str] = set()  # f"{date}:{slot}"
+        self._auction_lock = asyncio.Lock()
+        self._auction_board_cache: tuple[float, dict[str, Any]] | None = None
+        self._auction_prev_cache: tuple[float, dict[str, Any]] | None = None
+        self._auction_region_cache: dict[str, str] = {}
+
+    @staticmethod
+    def _auction_phase(now: datetime | None = None) -> str:
+        """idle | auction | after"""
+        now = now or datetime.now()
+        if now.weekday() >= 5:
+            return "idle"
+        t = now.time()
+        if time(9, 15) <= t < time(9, 30):
+            return "auction"
+        if t >= time(9, 30):
+            return "after"
+        return "idle"
+
+    @staticmethod
+    def _next_auction_open(now: datetime | None = None) -> datetime:
+        """下一竞价开窗时刻：下一工作日 09:15:00。"""
+        now = now or datetime.now()
+        if now.weekday() < 5 and now.time() < time(9, 15):
+            return now.replace(hour=9, minute=15, second=0, microsecond=0)
+        d = now.date() + timedelta(days=1)
+        while d.weekday() >= 5:
+            d += timedelta(days=1)
+        return datetime.combine(d, time(9, 15))
+
+    @staticmethod
+    def _auction_active_slot(now: datetime | None = None) -> str | None:
+        """当前应写入/刷新的快照时刻。"""
+        now = now or datetime.now()
+        t = now.time()
+        if time(9, 15) <= t < time(9, 20):
+            return "0915"
+        if time(9, 20) <= t < time(9, 25):
+            return "0920"
+        if time(9, 25) <= t < time(9, 30):
+            return "0925"
+        return None
+
+    async def _await_until_auction(self) -> None:
+        """休眠到下一竞价开窗；末段精确对齐 09:15:00，避免 30s 粒度错过准点。"""
+        while self._auction_phase() != "auction":
+            now = datetime.now()
+            target = self._next_auction_open(now)
+            sec = (target - now).total_seconds()
+            if sec <= 0:
+                # 时钟边界：短暂让出再重判 phase
+                await asyncio.sleep(0.05)
+                continue
+            # 长睡分段便于取消；最后一段一次睡满到 9:15
+            await asyncio.sleep(min(sec, 60.0) if sec > 60 else sec)
+
+    async def _yesterday_board_map(self) -> dict[str, int]:
+        """code -> 昨日连板数（用于「昨N板」标签）。"""
+        today = (self.snapshot.trade_date or "").strip() or today_yyyymmdd()
+        try:
+            from datetime import timedelta
+
+            d0 = datetime.strptime(today, "%Y%m%d").date()
+            for i in range(1, 10):
+                cand = (d0 - timedelta(days=i)).strftime("%Y%m%d")
+                rows = await list_zt_history_by_date(cand)
+                if rows:
+                    out: dict[str, int] = {}
+                    for r in rows:
+                        code = str(r.get("code") or "").zfill(6)
+                        if code.isdigit():
+                            out[code] = max(1, int(r.get("board_count") or 1))
+                    return out
+        except Exception:
+            pass
+        return {}
+
+    async def _enrich_auction_rows(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """竞价行补齐地域/连板标签。高频路径用批量 fundamentals，避免逐只打库。"""
+        yboard = await self._yesterday_board_map()
+        codes = [str(r.get("code") or "").zfill(6) for r in rows if r.get("code")]
+        try:
+            fund_map = await get_fundamentals_batch(codes)
+        except Exception:
+            fund_map = {}
+        # 写入短缓存，供后续轮询命中
+        for code, fund in fund_map.items():
+            region = str(fund.get("region") or "")
+            if region:
+                self._auction_region_cache[code] = region
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            code = str(r.get("code") or "").zfill(6)
+            fund = fund_map.get(code)
+            region = ""
+            concepts = list(r.get("concepts") or [])
+            industry = str(r.get("industry") or "")
+            float_mv = float(r.get("float_mv") or 0)
+            free_float_mv = None
+            if fund:
+                region = str(fund.get("region") or "") or self._auction_region_cache.get(
+                    code, ""
+                )
+                if not industry:
+                    industry = str(fund.get("industry") or "")
+                if fund.get("float_mv"):
+                    float_mv = float(fund.get("float_mv") or float_mv or 0)
+                if fund.get("free_float_mv") is not None:
+                    try:
+                        free_float_mv = float(fund.get("free_float_mv"))
+                    except (TypeError, ValueError):
+                        free_float_mv = None
+                raw_c = fund.get("concepts")
+                if isinstance(raw_c, str):
+                    try:
+                        import json as _json
+
+                        raw_c = _json.loads(raw_c)
+                    except Exception:
+                        raw_c = []
+                if isinstance(raw_c, list) and raw_c and not concepts:
+                    concepts = [str(x) for x in raw_c if x][:3]
+            else:
+                region = self._auction_region_cache.get(code, "")
+            if not concepts and industry:
+                concepts = [industry]
+            yb = int(yboard.get(code) or 0)
+            pct = float(r.get("auction_pct") or 0)
+            limit_up = float(r.get("limit_up") or 0)
+            price = float(r.get("price") or 0)
+            near_limit = limit_up > 0 and price > 0 and abs(price - limit_up) < 1e-4
+            if near_limit and yb > 0:
+                board = yb + 1
+                board_tag = "首板" if board <= 1 else f"{board}板"
+            elif yb > 0:
+                board = yb
+                board_tag = f"昨{yb}板"
+            else:
+                board = 1
+                board_tag = "首板" if near_limit else ""
+            out.append(
+                {
+                    **r,
+                    "code": code,
+                    "region": region,
+                    "industry": industry,
+                    "concepts": concepts[:3],
+                    "board_count": board,
+                    "board_tag": board_tag,
+                    "auction_pct": pct,
+                    "float_mv": float_mv,
+                    "free_float_mv": free_float_mv,
+                    "amount": float(r.get("amount") or 0),
+                    "change_pct": float(r.get("change_pct") or 0),
+                }
+            )
+        out.sort(
+            key=lambda x: (
+                float(x.get("seal_amount") or 0),
+                float(x.get("auction_pct") or 0),
+            ),
+            reverse=True,
+        )
+        return out
+
+    @staticmethod
+    def _updated_at_in_auction_window(updated_at: str, trade_date: str) -> bool:
+        """仅信任竞价窗口(09:15–09:30)写入的 seal；盘后误写一律丢弃。"""
+        raw = (updated_at or "").strip()
+        if not raw:
+            return False
+        ds = (trade_date or "").replace("-", "")[:8]
+        try:
+            if "T" in raw:
+                dt = datetime.fromisoformat(raw.replace("Z", ""))
+            else:
+                dt = datetime.strptime(raw[:19], "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return False
+        if ds and dt.strftime("%Y%m%d") != ds:
+            return False
+        t = dt.time()
+        return time(9, 15) <= t < time(9, 30)
+
+    async def refresh_auction(self) -> list[dict[str, Any]]:
+        """竞价时段拉取全市场观察池并落库；返回 enrichment 后的 live 列表。"""
+        self.__init_auction_state()
+        now = datetime.now()
+        phase = self._auction_phase(now)
+        if phase != "auction":
+            return list(self._auction_live)
+        # 双保险：wall-clock 必须在竞价窗，防止误写盘后封单
+        if self._auction_active_slot(now) is None:
+            return list(self._auction_live)
+
+        async with self._auction_lock:
+            # 竞价中：200 观察池 + fast 拉榜，单轮贴近约 1s 轮询
+            try:
+                raw = await self.client.fetch_auction_market_pool(
+                    limit=200, fast=True
+                )
+            except Exception:
+                raw = []
+            # 东财官方「竞价一字板」约 9:26 才更新；9:25 前只用盘口未匹配，避免串入旧日数据
+            tnow = now.time()
+            if tnow >= time(9, 25):
+                try:
+                    em_yizi = await self.client.fetch_em_auction_yizhi()
+                except Exception:
+                    em_yizi = []
+                if em_yizi:
+                    by = {str(x.get("code") or "").zfill(6): x for x in raw}
+                    for y in em_yizi:
+                        code = str(y.get("code") or "").zfill(6)
+                        # 只要当日 09:25 附近事件
+                        at = str(y.get("auction_time") or "")
+                        if at and not at.startswith("09:2"):
+                            continue
+                        cur = by.get(code) or {}
+                        by[code] = {
+                            **cur,
+                            **y,
+                            "is_yizhi": True,
+                            "seal_amount": float(y.get("seal_amount") or 0),
+                            "auction_pct": float(y.get("auction_pct") or 0),
+                            "amount": float(
+                                y.get("amount") or cur.get("amount") or 0
+                            ),
+                            "change_pct": float(
+                                cur.get("change_pct") or y.get("change_pct") or 0
+                            ),
+                            "float_mv": float(cur.get("float_mv") or 0),
+                            "industry": cur.get("industry")
+                            or y.get("industry")
+                            or "",
+                            "concepts": cur.get("concepts")
+                            or y.get("concepts")
+                            or [],
+                        }
+                    raw = list(by.values())
+            rows = await self._enrich_auction_rows(raw)
+            self._auction_live = rows
+            self._auction_live_at = now.isoformat(timespec="seconds")
+            self._auction_board_cache = None
+            self._auction_prev_cache = None
+            slot = self._auction_active_slot(now)
+            if slot and rows and self._auction_phase(datetime.now()) == "auction":
+                ds = (self.snapshot.trade_date or "").strip() or today_yyyymmdd()
+                try:
+                    # 当前时段持续覆盖写入：0915/0920/0925 各自独立快照
+                    await replace_auction_slot(
+                        ds, slot, rows, self._auction_live_at
+                    )
+                    self._auction_written.add(f"{ds}:{slot}")
+                    await purge_old_auction_dates(15)
+                except Exception:
+                    pass
+            return rows
+
+    async def auction_loop(self) -> None:
+        """独立竞价轮询：仅 9:15–9:30 拉全市场竞价；开窗前精确睡到 09:15:00。"""
+        from ..db import load_user_config
+
+        self.__init_auction_state()
+        await asyncio.sleep(2)
+        while True:
+            try:
+                phase = self._auction_phase()
+                if phase == "auction":
+                    await self.refresh_auction()
+                    try:
+                        cfg = load_user_config()
+                        iv = float(
+                            getattr(cfg.fields, "auction_poll_interval_sec", None) or 1.0
+                        )
+                    except Exception:
+                        iv = 1.0
+                    # 与约 200 池采集耗时对齐，避免 0.5s 空转排队
+                    iv = max(1.0, min(5.0, iv))
+                    await asyncio.sleep(iv)
+                else:
+                    # 非竞价窗：睡到下一工作日 09:15:00 准时开拉
+                    await self._await_until_auction()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                await asyncio.sleep(2.0)
+
+    @staticmethod
+    def _auction_seal_latest(row: dict[str, Any]) -> float:
+        for k in ("seal_0925", "seal_0920", "seal_0915"):
+            v = row.get(k)
+            if v is not None and float(v or 0) > 0:
+                return float(v)
+        return 0.0
+
+    def _merge_auction_day_columns(
+        self,
+        trade_date: str,
+        slots: dict[str, list[dict[str, Any]]],
+        live: list[dict[str, Any]] | None = None,
+        live_slot: str | None = None,
+        *,
+        is_today: bool = False,
+    ) -> dict[str, Any]:
+        """Merge three slots into per-stock rows; split 一字 / 非一字."""
+        by_code: dict[str, dict[str, Any]] = {}
+
+        def upsert(slot: str, row: dict[str, Any]) -> None:
+            code = str(row.get("code") or "").zfill(6)
+            if not code.isdigit():
+                return
+            cur = by_code.get(code)
+            if not cur:
+                cur = {
+                    "code": code,
+                    "name": str(row.get("name") or ""),
+                    "market": str(row.get("market") or ""),
+                    "board_count": int(row.get("board_count") or 1),
+                    "board_tag": str(row.get("board_tag") or ""),
+                    "concepts": list(row.get("concepts") or []),
+                    "region": str(row.get("region") or ""),
+                    "industry": str(row.get("industry") or ""),
+                    "is_yizhi": bool(row.get("is_yizhi")),
+                    "auction_pct": float(row.get("auction_pct") or 0),
+                    "change_pct": float(row.get("change_pct") or 0)
+                    if is_today
+                    else None,
+                    "amount": float(row.get("amount") or 0),
+                    "float_mv": float(row.get("float_mv") or 0),
+                    "free_float_mv": row.get("free_float_mv"),
+                    "price": float(row.get("last_price") or row.get("price") or 0),
+                    "price_0915": None,
+                    "price_0920": None,
+                    "price_0925": None,
+                    "seal_0915": None,
+                    "seal_0920": None,
+                    "seal_0925": None,
+                    "pct_0915": None,
+                    "pct_0920": None,
+                    "pct_0925": None,
+                }
+                by_code[code] = cur
+            cur["name"] = str(row.get("name") or cur["name"])
+            cur["board_count"] = max(
+                int(cur.get("board_count") or 1), int(row.get("board_count") or 1)
+            )
+            if row.get("board_tag"):
+                cur["board_tag"] = str(row.get("board_tag") or "")
+            if row.get("concepts"):
+                cur["concepts"] = list(row.get("concepts") or [])
+            if row.get("region"):
+                cur["region"] = str(row.get("region") or "")
+            if row.get("market"):
+                cur["market"] = str(row.get("market") or "")
+            if row.get("is_yizhi"):
+                cur["is_yizhi"] = True
+            if row.get("amount"):
+                cur["amount"] = float(row.get("amount") or 0)
+            if row.get("float_mv"):
+                cur["float_mv"] = float(row.get("float_mv") or 0)
+            if row.get("free_float_mv") is not None:
+                cur["free_float_mv"] = row.get("free_float_mv")
+            if is_today and row.get("change_pct") is not None:
+                cur["change_pct"] = float(row.get("change_pct") or 0)
+            price = float(row.get("price") or 0)
+            last_p = float(row.get("last_price") or price or 0)
+            seal = float(row.get("seal_amount") or 0)
+            pct = float(row.get("auction_pct") or 0)
+            cur[f"price_{slot}"] = price if price > 0 else None
+            # 未匹配额：仅竞价一字；0/缺失 → None（前端 —）
+            cur[f"seal_{slot}"] = seal if seal > 0 else None
+            cur[f"pct_{slot}"] = pct
+            if last_p > 0:
+                cur["price"] = last_p
+            elif price > 0:
+                cur["price"] = price
+            cur["auction_pct"] = pct
+
+        for slot in ("0915", "0920", "0925"):
+            for row in slots.get(slot) or []:
+                upsert(slot, row)
+        if live and live_slot in ("0915", "0920", "0925"):
+            for row in live:
+                upsert(live_slot, row)
+
+        items = list(by_code.values())
+        # 非一字强制清空三时段未匹配额
+        for x in items:
+            if not x.get("is_yizhi"):
+                x["seal_0915"] = None
+                x["seal_0920"] = None
+                x["seal_0925"] = None
+
+        def sort_key(x: dict[str, Any]) -> tuple:
+            return (
+                self._auction_seal_latest(x),
+                float(x.get("auction_pct") or 0),
+                float(x.get("amount") or 0),
+            )
+
+        items.sort(key=sort_key, reverse=True)
+        yizhi_items = [x for x in items if x.get("is_yizhi")]
+        other_items = [x for x in items if not x.get("is_yizhi")]
+        seal_sum = 0.0
+        for x in yizhi_items:
+            seal_sum += self._auction_seal_latest(x)
+        label = trade_date
+        if len(trade_date) == 8:
+            label = f"{trade_date[0:4]}-{trade_date[4:6]}-{trade_date[6:8]}"
+        return {
+            "date": trade_date,
+            "date_label": label,
+            "yizhi_count": len(yizhi_items),
+            "other_count": len(other_items),
+            "seal_total": seal_sum,
+            "yizhi_items": yizhi_items,
+            "other_items": other_items,
+            # 兼容旧前端
+            "items": items,
+        }
+
+    async def get_auction_board(
+        self, days: int = 3, date: str | None = None
+    ) -> dict[str, Any]:
+        """单日宽表竞价数据 + 可切换的近 N 日日期列表。"""
+        self.__init_auction_state()
+        days = max(1, min(5, int(days or 3)))
+        now = datetime.now()
+        phase = self._auction_phase(now)
+        today = (self.snapshot.trade_date or "").strip() or today_yyyymmdd()
+        req_date = (date or "").replace("-", "").strip()
+        if len(req_date) != 8 or not req_date.isdigit():
+            req_date = today
+
+        cache_key = f"{req_date}:{phase}:{self._auction_live_at}"
+        # 盘后重建含分时回补，缓存稍长避免反复打满行情接口
+        ttl = 0.35 if phase == "auction" else 60.0
+        cached = self._auction_board_cache
+        if (
+            cached
+            and (now.timestamp() - cached[0]) < ttl
+            and isinstance(cached[1], dict)
+            and cached[1].get("_cache_key") == cache_key
+        ):
+            out = dict(cached[1])
+            out.pop("_cache_key", None)
+            return out
+
+        live_slot = self._auction_active_slot(now) if phase == "auction" else None
+        live = list(self._auction_live) if phase == "auction" else []
+
+        saved = await load_auction_dates(limit=days + 3)
+        dates: list[str] = []
+        if today not in saved:
+            dates.append(today)
+        for d in saved:
+            if d not in dates:
+                dates.append(d)
+            if len(dates) >= days:
+                break
+        dates = sorted(dates, reverse=True)[:days]
+        if req_date not in dates:
+            dates = sorted(set(dates + [req_date]), reverse=True)[: max(days, len(dates) + 1)]
+
+        db_slots = await load_auction_day(req_date)
+
+        def _trusted_seal_map(
+            slots: dict[str, list[dict[str, Any]]], trade_ds: str
+        ) -> dict[str, dict[str, float]]:
+            """code -> {0915/0920/0925: seal}，仅竞价窗口写入且>0。"""
+            out: dict[str, dict[str, float]] = {}
+            for slot in ("0915", "0920", "0925"):
+                for row in slots.get(slot) or []:
+                    code = str(row.get("code") or "").zfill(6)
+                    if not code.isdigit():
+                        continue
+                    if not self._updated_at_in_auction_window(
+                        str(row.get("updated_at") or ""), trade_ds
+                    ):
+                        continue
+                    seal = float(row.get("seal_amount") or 0)
+                    if seal <= 0:
+                        continue
+                    out.setdefault(code, {})[slot] = seal
+            return out
+
+        if phase == "auction" and req_date == today:
+            # 竞价中：live 全市场池 + 已落库时段
+            slots = {
+                "0915": list(db_slots.get("0915") or []),
+                "0920": list(db_slots.get("0920") or []),
+                "0925": list(db_slots.get("0925") or []),
+            }
+            col = self._merge_auction_day_columns(
+                req_date,
+                slots,
+                live=live,
+                live_slot=live_slot,
+                is_today=True,
+            )
+        elif req_date == today:
+            # 盘后今日：东财官方竞价一字板 + 全市场观察池（非一字无未匹配额）
+            try:
+                em_yizi = await self.client.fetch_em_auction_yizhi()
+            except Exception:
+                em_yizi = []
+            try:
+                raw = await self.client.fetch_auction_market_pool(
+                    limit=200, use_open=True
+                )
+            except Exception:
+                raw = []
+            yizi_codes = {
+                str(y.get("code") or "").zfill(6) for y in em_yizi if y.get("code")
+            }
+            # 非一字：观察池去掉一字代码
+            other_raw = [
+                r
+                for r in raw
+                if str(r.get("code") or "").zfill(6) not in yizi_codes
+            ]
+            for r in other_raw:
+                r["is_yizhi"] = False
+                r["seal_amount"] = 0.0
+            # 一字：以东财 jjyd sk=1 为准（未匹配额=f6，涨幅=f7，成交额=f11）
+            yizi_rows = []
+            for y in em_yizi:
+                code = str(y.get("code") or "").zfill(6)
+                base = next(
+                    (
+                        r
+                        for r in raw
+                        if str(r.get("code") or "").zfill(6) == code
+                    ),
+                    {},
+                )
+                yizi_rows.append(
+                    {
+                        **base,
+                        **y,
+                        "is_yizhi": True,
+                        "seal_amount": float(y.get("seal_amount") or 0),
+                        "auction_pct": float(y.get("auction_pct") or 0),
+                        "amount": float(y.get("amount") or 0),
+                        "industry": base.get("industry") or "",
+                        "concepts": base.get("concepts") or [],
+                        "float_mv": float(base.get("float_mv") or 0),
+                        "change_pct": float(base.get("change_pct") or 0),
+                    }
+                )
+            merged = yizi_rows + other_raw
+            rows = await self._enrich_auction_rows(merged)
+            # 可信库内 0915/0920 seal（仅一字）
+            trusted = _trusted_seal_map(db_slots, req_date)
+            synth_rows = []
+            for r in rows:
+                code = str(r.get("code") or "").zfill(6)
+                item = dict(r)
+                if item.get("is_yizhi"):
+                    # 9:25 未匹配用东财；9:15/9:20 仅用竞价窗口落库
+                    seals = trusted.get(code) or {}
+                    item["_seal_0915"] = seals.get("0915")
+                    item["_seal_0920"] = seals.get("0920")
+                    item["_seal_0925"] = float(item.get("seal_amount") or 0) or None
+                else:
+                    item["seal_amount"] = 0.0
+                    item["_seal_0915"] = None
+                    item["_seal_0920"] = None
+                    item["_seal_0925"] = None
+                synth_rows.append(item)
+            # 用 0925 骨架 merge，再回填三时段
+            synth = {"0915": [], "0920": [], "0925": synth_rows}
+            col = self._merge_auction_day_columns(
+                req_date,
+                synth,
+                live=None,
+                live_slot=None,
+                is_today=True,
+            )
+            for x in col.get("items") or []:
+                code = str(x.get("code") or "").zfill(6)
+                src = next(
+                    (r for r in synth_rows if str(r.get("code")) == code), None
+                )
+                if not src:
+                    continue
+                if src.get("is_yizhi"):
+                    x["is_yizhi"] = True
+                    x["seal_0915"] = src.get("_seal_0915")
+                    x["seal_0920"] = src.get("_seal_0920")
+                    x["seal_0925"] = src.get("_seal_0925")
+                    x["auction_pct"] = float(src.get("auction_pct") or 0)
+                    x["amount"] = float(src.get("amount") or 0)
+                else:
+                    x["is_yizhi"] = False
+                    x["seal_0915"] = None
+                    x["seal_0920"] = None
+                    x["seal_0925"] = None
+            items = list(col.get("items") or [])
+            items.sort(
+                key=lambda x: (
+                    self._auction_seal_latest(x),
+                    float(x.get("auction_pct") or 0),
+                    float(x.get("amount") or 0),
+                ),
+                reverse=True,
+            )
+            yizhi_items = [x for x in items if x.get("is_yizhi")]
+            other_items = [x for x in items if not x.get("is_yizhi")]
+            col["items"] = items
+            col["yizhi_items"] = yizhi_items
+            col["other_items"] = other_items
+            col["yizhi_count"] = len(yizhi_items)
+            col["other_count"] = len(other_items)
+            col["seal_total"] = sum(
+                self._auction_seal_latest(x) for x in yizhi_items
+            )
+            if today not in dates:
+                dates = ([today] + dates)[:days]
+        else:
+            # 历史日：只用当日落库快照；丢弃非竞价窗口 seal
+            trusted = _trusted_seal_map(db_slots, req_date)
+            cleaned: dict[str, list[dict[str, Any]]] = {
+                "0915": [],
+                "0920": [],
+                "0925": [],
+            }
+            for slot in ("0915", "0920", "0925"):
+                for row in db_slots.get(slot) or []:
+                    r = dict(row)
+                    code = str(r.get("code") or "").zfill(6)
+                    seal_ok = code in trusted and slot in trusted.get(code, {})
+                    if seal_ok and r.get("is_yizhi"):
+                        r["seal_amount"] = trusted[code][slot]
+                    else:
+                        r["seal_amount"] = 0.0
+                    cleaned[slot].append(r)
+            col = self._merge_auction_day_columns(
+                req_date,
+                cleaned,
+                live=None,
+                live_slot=None,
+                is_today=False,
+            )
+
+        # 今日：只刷实时涨幅/股价/市值，绝不覆盖竞价涨幅与竞价成交额
+        if req_date == today and (col.get("items") or []):
+            codes = [str(x.get("code")) for x in col["items"] if x.get("code")]
+            try:
+                quotes = await self.client.fetch_quotes_tencent_batch(codes[:500])
+            except Exception:
+                quotes = {}
+            for x in col["items"]:
+                q = quotes.get(str(x.get("code") or ""))
+                if not q:
+                    continue
+                last = float(q.get("price") or 0)
+                prev = float(q.get("prev_close") or 0)
+                open_p = float(q.get("open") or 0)
+                limit_up = float(q.get("limit_up") or 0)
+                if last > 0:
+                    x["price"] = last
+                live_pct = float(q.get("change_pct") or 0)
+                if abs(live_pct) < 1e-12 and prev > 0 and last > 0:
+                    live_pct = round((last - prev) / prev * 100, 2)
+                x["change_pct"] = live_pct
+                if q.get("float_mv"):
+                    x["float_mv"] = float(q.get("float_mv") or 0)
+                # 非一字：盘后用开盘价校正竞价涨幅；一字已由东财 jjyd 锁定，勿覆盖
+                if (
+                    phase != "auction"
+                    and not x.get("is_yizhi")
+                    and open_p > 0
+                    and prev > 0
+                ):
+                    x["auction_pct"] = round((open_p - prev) / prev * 100, 2)
+                if not x.get("is_yizhi"):
+                    x["seal_0915"] = None
+                    x["seal_0920"] = None
+                    x["seal_0925"] = None
+            items = col["items"]
+            items.sort(
+                key=lambda x: (
+                    self._auction_seal_latest(x),
+                    float(x.get("auction_pct") or 0),
+                    float(x.get("amount") or 0),
+                ),
+                reverse=True,
+            )
+            col["items"] = items
+            col["yizhi_items"] = [x for x in items if x.get("is_yizhi")]
+            col["other_items"] = [x for x in items if not x.get("is_yizhi")]
+            col["yizhi_count"] = len(col["yizhi_items"])
+            col["other_count"] = len(col["other_items"])
+            col["seal_total"] = sum(
+                self._auction_seal_latest(x) for x in col["yizhi_items"]
+            )
+
+        date_options = []
+        for ds in dates:
+            label = ds
+            if len(ds) == 8:
+                label = f"{ds[0:4]}-{ds[4:6]}-{ds[6:8]}"
+            date_options.append({"date": ds, "date_label": label})
+
+        result = {
+            "phase": phase,
+            "active_slot": live_slot,
+            "trade_date": today,
+            "selected_date": req_date,
+            "dates": date_options,
+            "updated_at": self._auction_live_at or "",
+            "column": col,
+            "_cache_key": cache_key,
+        }
+        self._auction_board_cache = (now.timestamp(), result)
+        public = dict(result)
+        public.pop("_cache_key", None)
+        return public
+
+    async def get_auction_prev_ladder(self) -> dict[str, Any]:
+        """昨日涨停股 + 今日竞价涨幅，按连板数分组（对齐天梯晋级视角）。
+
+        竞价涨幅口径：竞价中用撮合价/昨收；盘后用开盘价/昨收（=9:25 结果）。
+        仅停牌（无开盘价）才为空。
+        """
+        self.__init_auction_state()
+        phase = self._auction_phase()
+        ttl = 0.35 if phase == "auction" else 5.0
+        now_ts = datetime.now().timestamp()
+        cached = self._auction_prev_cache
+        if cached and (now_ts - cached[0]) < ttl:
+            return cached[1]
+
+        today = (self.snapshot.trade_date or "").strip() or today_yyyymmdd()
+        prev_ds = ""
+        prev_rows: list[dict[str, Any]] = []
+        try:
+            from datetime import timedelta
+
+            d0 = datetime.strptime(today, "%Y%m%d").date()
+            for i in range(1, 10):
+                cand = (d0 - timedelta(days=i)).strftime("%Y%m%d")
+                rows = await list_zt_history_by_date(cand)
+                if rows:
+                    prev_ds = cand
+                    prev_rows = rows
+                    break
+        except Exception:
+            prev_rows = []
+
+        codes = [
+            str(r.get("code") or "").zfill(6)
+            for r in prev_rows
+            if str(r.get("code") or "").zfill(6).isdigit()
+        ]
+        # 全量昨涨停股拉行情：竞价中=撮合价涨幅；盘后=开盘价涨幅
+        pct_map: dict[str, float] = {}
+        name_map: dict[str, str] = {}
+        suspended: set[str] = set()
+        try:
+            quotes = await self.client.fetch_quotes_tencent_batch(codes)
+        except Exception:
+            quotes = {}
+        for code, q in (quotes or {}).items():
+            name_map[code] = str(q.get("name") or "")
+            prev = float(q.get("prev_close") or 0)
+            open_p = float(q.get("open") or 0)
+            last = float(q.get("price") or 0)
+            if phase == "auction":
+                if last <= 0:
+                    suspended.add(code)
+                    continue
+                pct = float(q.get("change_pct") or 0)
+                if abs(pct) < 1e-12 and prev > 0:
+                    pct = round((last - prev) / prev * 100, 2)
+                pct_map[code] = pct
+            else:
+                if open_p <= 0:
+                    suspended.add(code)
+                    continue
+                if prev > 0:
+                    pct_map[code] = round((open_p - prev) / prev * 100, 2)
+
+        # live 覆盖（竞价中更准）
+        if phase == "auction":
+            for r in self._auction_live:
+                code = str(r.get("code") or "").zfill(6)
+                if code in codes:
+                    pct_map[code] = float(r.get("auction_pct") or 0)
+                    if r.get("name"):
+                        name_map[code] = str(r.get("name") or "")
+
+        def _market_of(code: str) -> str:
+            if code.startswith(("300", "301")):
+                return "创"
+            if code.startswith(("688", "689")):
+                return "科"
+            if code.startswith("8") or code.startswith("4"):
+                return "北"
+            if code.startswith("6"):
+                return "沪"
+            return "深"
+
+        groups_map: dict[int, list[dict[str, Any]]] = {}
+        for r in prev_rows:
+            code = str(r.get("code") or "").zfill(6)
+            if not code.isdigit():
+                continue
+            board = max(1, int(r.get("board_count") or 1))
+            region = self._auction_region_cache.get(code, "")
+            industry = str(r.get("industry") or "")
+            if code not in self._auction_region_cache:
+                fund = None
+                try:
+                    fund = await get_fundamentals(code)
+                except Exception:
+                    fund = None
+                region = str((fund or {}).get("region") or "")
+                if not industry:
+                    industry = str((fund or {}).get("industry") or "")
+                self._auction_region_cache[code] = region
+            reason = str(r.get("reason") or industry or "")
+            has_pct = code in pct_map
+            item = {
+                "code": code,
+                "name": name_map.get(code) or str(r.get("name") or ""),
+                "market": _market_of(code),
+                "board_count": board,
+                "board_tag": "首板" if board <= 1 else f"{board}连板",
+                "auction_pct": float(pct_map[code]) if has_pct else None,
+                "suspended": code in suspended,
+                "region": region,
+                "industry": industry,
+                "concepts": [reason] if reason else [],
+                "reason": reason,
+            }
+            groups_map.setdefault(board, []).append(item)
+
+        groups = []
+        for board in sorted(groups_map.keys(), reverse=True):
+            stocks = groups_map[board]
+            stocks.sort(
+                key=lambda x: (
+                    x.get("auction_pct") is not None,
+                    float(x.get("auction_pct") or -999),
+                ),
+                reverse=True,
+            )
+            # 晋级视角：昨日 N 板 → 关注能否晋级到 N+1（展示为 N进N+1）
+            if board <= 1:
+                label = "1进2"
+                # 首板池在天梯底部单独叫「首板」；昨日首板今日冲 2 板用 1进2
+                # 与例图一致：昨日首板行展示为 1进2，另可有「首板」——此处昨日涨停里 board=1 即 1进2
+            else:
+                label = f"{board}进{board + 1}"
+            # 竞价封板率：有竞价涨幅且接近涨停（≥9.5%）/ 组内总数
+            sealed_n = sum(
+                1
+                for x in stocks
+                if x.get("auction_pct") is not None
+                and float(x.get("auction_pct") or 0) >= 9.5
+            )
+            total_n = len(stocks)
+            rate_pct = int(round(100.0 * sealed_n / total_n)) if total_n else 0
+            groups.append(
+                {
+                    "key": f"b{board}",
+                    "label": label if board > 1 else "1进2",
+                    "board_count": board,
+                    "count": total_n,
+                    "promotion_rate": f"{sealed_n}/{total_n} = {rate_pct}%",
+                    "stocks": stocks,
+                }
+            )
+
+        result = {
+            "phase": phase,
+            "trade_date": today,
+            "prev_date": prev_ds,
+            "updated_at": self._auction_live_at or "",
+            "groups": groups,
+        }
+        self._auction_prev_cache = (now_ts, result)
+        return result
 
     @staticmethod
     def format_money(v: float) -> str:
