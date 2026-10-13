@@ -88,6 +88,20 @@ class SpeechEvent(BaseModel):
     board_count: int = 1
 
 
+class AlertEvent(BaseModel):
+    """异动播报事件（冲击涨停 / 封死涨停 / 封涨大减 / 涨停打开 / 涨停被砸）。"""
+
+    type: str
+    code: str
+    name: str
+    text: str
+    board_count: int = 1
+    board_label: str = "首板"
+    time: str = ""
+    detail: str = ""
+    industry: str = ""
+
+
 class MarketSnapshot(BaseModel):
     trade_date: str
     updated_at: str
@@ -98,6 +112,19 @@ class MarketSnapshot(BaseModel):
     dt: list[StockItem] = Field(default_factory=list)
     ladder: list[LadderGroup] = Field(default_factory=list)
     speech_events: list[SpeechEvent] = Field(default_factory=list)
+    # 本轮新产生的异动（供 TTS）；alert_feed 为当日流水（供表格）
+    alert_events: list[AlertEvent] = Field(default_factory=list)
+    alert_feed: list[AlertEvent] = Field(default_factory=list)
+
+
+DEFAULT_ALERT_SPEECH_TYPES: list[str] = [
+    "impact_zt",
+    "seal_firm",
+    "seal_drop",
+    "seal_rise",
+    "zt_open",
+    "zt_smash",
+]
 
 
 class FieldConfig(BaseModel):
@@ -138,6 +165,12 @@ class FieldConfig(BaseModel):
     speed_poll_interval_sec: float = 1.5
     # 连板天梯是否展示封板/回封/炸板时间
     ladder_show_times: bool = True
+    # 异动播报（独立于普通涨停/连板/炸板语音）
+    alert_speech_enabled: bool = True
+    alert_speech_types: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_ALERT_SPEECH_TYPES)
+    )
+    alert_speech_interval_sec: float = 1.0
 
 
 AVAILABLE_FIELDS: dict[str, str] = {
@@ -170,4 +203,8 @@ class UserConfig(BaseModel):
     fields: FieldConfig = Field(default_factory=FieldConfig)
     # 重点观察股票代码列表（持久化到本地 user_config.json）
     watchlist: list[str] = Field(default_factory=list)
+    watchlist_pinned: list[str] = Field(default_factory=list)
+    # 异动播报股票池（与重点观察分离）
+    alertlist: list[str] = Field(default_factory=list)
+    alertlist_pinned: list[str] = Field(default_factory=list)
     extra: dict[str, Any] = Field(default_factory=dict)

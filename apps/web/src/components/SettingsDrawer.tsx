@@ -1,6 +1,7 @@
 import { Button, Checkbox, Drawer, InputNumber, Space, Switch } from "antd";
 import { useEffect, useState } from "react";
 import type { FieldConfig } from "../types";
+import { DEFAULT_ALERT_SPEECH_TYPES } from "../types";
 
 export function SettingsDrawer({
   open,
@@ -24,6 +25,9 @@ export function SettingsDrawer({
 
   const pollSec = draft.poll_interval_sec ?? 2.5;
   const speedSec = draft.speed_poll_interval_sec ?? 1.5;
+  const alertSec = draft.alert_speech_interval_sec ?? 1;
+  const alertTypes = draft.alert_speech_types ?? [...DEFAULT_ALERT_SPEECH_TYPES];
+  const alertEnabled = draft.alert_speech_enabled !== false;
 
   return (
     <Drawer
@@ -42,7 +46,11 @@ export function SettingsDrawer({
               try {
                 await onSave({
                   ...draft,
+                  speech_enabled: !!draft.speech_enabled,
                   speech_mode: "realtime",
+                  speech_types: draft.speech_types?.length
+                    ? draft.speech_types
+                    : ["zt", "lb", "zb"],
                   poll_interval_sec: Math.max(
                     1,
                     Math.min(30, Number(draft.poll_interval_sec) || 2.5),
@@ -51,6 +59,13 @@ export function SettingsDrawer({
                     0.5,
                     Math.min(10, Number(draft.speed_poll_interval_sec) || 1.5),
                   ),
+                  alert_speech_interval_sec: Math.max(
+                    0.5,
+                    Math.min(5, Number(draft.alert_speech_interval_sec) || 1),
+                  ),
+                  alert_speech_types:
+                    draft.alert_speech_types ?? [...DEFAULT_ALERT_SPEECH_TYPES],
+                  alert_speech_enabled: draft.alert_speech_enabled !== false,
                 });
                 onClose();
               } finally {
@@ -128,7 +143,7 @@ export function SettingsDrawer({
           <Space>
             <span>启用实时播报</span>
             <Switch
-              checked={draft.speech_enabled}
+              checked={!!draft.speech_enabled}
               onChange={(v) =>
                 setDraft({ ...draft, speech_enabled: v, speech_mode: "realtime" })
               }
@@ -148,6 +163,54 @@ export function SettingsDrawer({
               ]}
               value={draft.speech_types}
               onChange={(v) => setDraft({ ...draft, speech_types: v as string[] })}
+            />
+          </div>
+        </Space>
+      </div>
+
+      <div className="settings-block">
+        <h4>异动播报</h4>
+        <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+          <Space>
+            <span>启用异动语音</span>
+            <Switch
+              checked={alertEnabled}
+              onChange={(v) => setDraft({ ...draft, alert_speech_enabled: v })}
+            />
+          </Space>
+          <Space align="center">
+            <span>轮询间隔</span>
+            <InputNumber
+              min={0.5}
+              max={5}
+              step={0.5}
+              value={alertSec}
+              onChange={(v) =>
+                setDraft({
+                  ...draft,
+                  alert_speech_interval_sec: typeof v === "number" ? v : 1,
+                })
+              }
+              addonAfter="秒"
+              style={{ width: 140 }}
+            />
+          </Space>
+          <div style={{ color: "var(--muted)", fontSize: 12, lineHeight: 1.5 }}>
+            仅监控「异动播报」栏中的股票。默认全部类型开启，间隔 1 秒。音色与普通播报区分。
+          </div>
+          <div>
+            <div style={{ marginBottom: 8, color: "var(--muted)", fontSize: 13 }}>异动类型</div>
+            <Checkbox.Group
+              options={[
+                { label: "冲击涨停", value: "impact_zt" },
+                { label: "封死涨停", value: "seal_firm" },
+                { label: "封涨大减", value: "seal_drop" },
+                { label: "封涨大增", value: "seal_rise" },
+                { label: "涨停打开", value: "zt_open" },
+                { label: "涨停被砸", value: "zt_smash" },
+              ]}
+              value={alertTypes}
+              onChange={(v) => setDraft({ ...draft, alert_speech_types: v as string[] })}
             />
           </div>
         </Space>

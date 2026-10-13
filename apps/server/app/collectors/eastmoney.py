@@ -1266,17 +1266,50 @@ class EastMoneyClient:
                     total_yi = float(parts[45]) if len(parts) > 45 and parts[45] else 0.0
                     if not price and not change_pct:
                         continue
+                    buy1 = float(parts[9] or 0) if len(parts) > 9 else 0.0
+                    buy1_vol_hands = float(parts[10] or 0) if len(parts) > 10 else 0.0
+                    sell1 = float(parts[19] or 0) if len(parts) > 19 else 0.0
+                    sell1_vol_hands = float(parts[20] or 0) if len(parts) > 20 else 0.0
+                    limit_up = float(parts[47] or 0) if len(parts) > 47 else 0.0
+                    limit_down = float(parts[48] or 0) if len(parts) > 48 else 0.0
+                    amount = 0.0
+                    # index 35 形如 "现价/成交量(手)/成交额(元)"
+                    if len(parts) > 35 and parts[35] and "/" in str(parts[35]):
+                        try:
+                            segs = str(parts[35]).split("/")
+                            if len(segs) >= 3:
+                                amount = float(segs[2] or 0)
+                        except (TypeError, ValueError):
+                            amount = 0.0
+                    if amount <= 0 and len(parts) > 37 and parts[37] not in ("", None):
+                        try:
+                            # 备选：万元
+                            amount = float(parts[37] or 0) * 10000
+                        except (TypeError, ValueError):
+                            amount = 0.0
+                    seal_amount = 0.0
+                    if buy1 > 0 and buy1_vol_hands > 0:
+                        seal_amount = buy1_vol_hands * 100 * buy1
                     result[code] = {
                         "code": code,
                         "name": name,
                         "price": price,
                         "change_pct": change_pct,
                         "volume": vol_hands * 100,
+                        "amount": amount,
                         "total_mv": total_yi * 1e8 if total_yi else 0.0,
                         "float_mv": float_yi * 1e8 if float_yi else 0.0,
                         "open": float(parts[5] or 0) if len(parts) > 5 else 0.0,
                         "high": float(parts[33] or 0) if len(parts) > 33 else 0.0,
                         "low": float(parts[34] or 0) if len(parts) > 34 else 0.0,
+                        "prev_close": prev,
+                        "buy1": buy1,
+                        "buy1_vol": buy1_vol_hands * 100,
+                        "sell1": sell1,
+                        "sell1_vol": sell1_vol_hands * 100,
+                        "limit_up": limit_up,
+                        "limit_down": limit_down,
+                        "seal_amount": seal_amount,
                         "quote_date": str(parts[30])[:8] if len(parts) > 30 else "",
                     }
                 except Exception:

@@ -13,7 +13,13 @@ from pydantic import BaseModel, Field
 
 from .collectors.ths import ThsClient, build_stock_radar
 from .config import settings
-from .db import init_db, load_user_config, update_field_config, update_watchlist
+from .db import (
+    init_db,
+    load_user_config,
+    update_alertlist,
+    update_field_config,
+    update_watchlist,
+)
 from .models import AVAILABLE_FIELDS, FieldConfig
 from .services.market import market_service
 from .services.ttl_cache import ttl_cache, trading_ttl
@@ -42,14 +48,15 @@ async def lifespan(app: FastAPI):
     poll_task = asyncio.create_task(
         market_service.poll_loop(settings.poll_interval_sec, settings.idle_poll_interval_sec)
     )
+    alert_task = asyncio.create_task(market_service.alert_loop())
     fund_task = asyncio.create_task(market_service.fund_worker())
     history_task = asyncio.create_task(market_service.history_backfill_worker(120))
     risk_task = asyncio.create_task(market_service.risk_worker(600))
     cache_task = asyncio.create_task(ttl_cache.cleanup_loop(600))
     yield
-    for t in (poll_task, fund_task, history_task, risk_task, cache_task):
+    for t in (poll_task, alert_task, fund_task, history_task, risk_task, cache_task):
         t.cancel()
-    for t in (poll_task, fund_task, history_task, risk_task, cache_task):
+    for t in (poll_task, alert_task, fund_task, history_task, risk_task, cache_task):
         try:
             await t
         except asyncio.CancelledError:
@@ -281,24 +288,60 @@ async def put_fields(fields: FieldConfig):
         )
     except Exception:
         fields.speed_poll_interval_sec = 1.5
+    try:
+        fields.alert_speech_interval_sec = max(
+            0.5, min(5.0, float(fields.alert_speech_interval_sec or 1.0))
+        )
+    except Exception:
+        fields.alert_speech_interval_sec = 1.0
     cfg = update_field_config(fields)
     return cfg.model_dump()
 
 
 class WatchlistBody(BaseModel):
     codes: list[str] = Field(default_factory=list)
+    pinned: list[str] | None = None
+
+
+class AlertlistBody(BaseModel):
+    codes: list[str] = Field(default_factory=list)
+    pinned: list[str] | None = None
 
 
 @app.get("/api/watchlist")
 async def get_watchlist():
     cfg = load_user_config()
-    return {"codes": list(cfg.watchlist or [])}
+    return {
+        "codes": list(cfg.watchlist or []),
+        "pinned": list(cfg.watchlist_pinned or []),
+    }
 
 
 @app.put("/api/watchlist")
 async def put_watchlist(body: WatchlistBody):
-    cfg = update_watchlist(body.codes)
-    return {"codes": list(cfg.watchlist or [])}
+    cfg = update_watchlist(body.codes, body.pinned)
+    return {
+        "codes": list(cfg.watchlist or []),
+        "pinned": list(cfg.watchlist_pinned or []),
+    }
+
+
+@app.get("/api/alertlist")
+async def get_alertlist():
+    cfg = load_user_config()
+    return {
+        "codes": list(cfg.alertlist or []),
+        "pinned": list(cfg.alertlist_pinned or []),
+    }
+
+
+@app.put("/api/alertlist")
+async def put_alertlist(body: AlertlistBody):
+    cfg = update_alertlist(body.codes, body.pinned)
+    return {
+        "codes": list(cfg.alertlist or []),
+        "pinned": list(cfg.alertlist_pinned or []),
+    }
 
 
 @app.websocket("/ws/market")

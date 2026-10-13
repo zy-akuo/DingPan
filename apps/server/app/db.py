@@ -401,7 +401,7 @@ def update_field_config(fields: FieldConfig) -> UserConfig:
     return cfg
 
 
-def _normalize_watchlist(codes: list[str] | None) -> list[str]:
+def _normalize_codes(codes: list[str] | None) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
     for x in codes or []:
@@ -413,9 +413,43 @@ def _normalize_watchlist(codes: list[str] | None) -> list[str]:
     return out
 
 
-def update_watchlist(codes: list[str] | None) -> UserConfig:
+def _normalize_pinned(pinned: list[str] | None, codes: list[str]) -> list[str]:
+    code_set = set(codes)
+    out: list[str] = []
+    seen: set[str] = set()
+    for x in pinned or []:
+        c = str(x or "").strip().zfill(6)
+        if c not in code_set or c in seen:
+            continue
+        seen.add(c)
+        out.append(c)
+    return out
+
+
+def update_watchlist(
+    codes: list[str] | None,
+    pinned: list[str] | None = None,
+) -> UserConfig:
     cfg = load_user_config()
-    cfg.watchlist = _normalize_watchlist(codes)
+    cfg.watchlist = _normalize_codes(codes)
+    if pinned is not None:
+        cfg.watchlist_pinned = _normalize_pinned(pinned, cfg.watchlist)
+    else:
+        cfg.watchlist_pinned = _normalize_pinned(cfg.watchlist_pinned, cfg.watchlist)
+    save_user_config(cfg)
+    return cfg
+
+
+def update_alertlist(
+    codes: list[str] | None,
+    pinned: list[str] | None = None,
+) -> UserConfig:
+    cfg = load_user_config()
+    cfg.alertlist = _normalize_codes(codes)
+    if pinned is not None:
+        cfg.alertlist_pinned = _normalize_pinned(pinned, cfg.alertlist)
+    else:
+        cfg.alertlist_pinned = _normalize_pinned(cfg.alertlist_pinned, cfg.alertlist)
     save_user_config(cfg)
     return cfg
 

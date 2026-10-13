@@ -130,6 +130,18 @@ export interface SpeechEvent {
   board_count: number;
 }
 
+export interface AlertEvent {
+  type: string;
+  code: string;
+  name: string;
+  text: string;
+  board_count: number;
+  board_label: string;
+  time: string;
+  detail: string;
+  industry: string;
+}
+
 export interface MarketSnapshot {
   trade_date: string;
   updated_at: string;
@@ -140,7 +152,18 @@ export interface MarketSnapshot {
   dt: StockItem[];
   ladder: LadderGroup[];
   speech_events: SpeechEvent[];
+  alert_events?: AlertEvent[];
+  alert_feed?: AlertEvent[];
 }
+
+export const DEFAULT_ALERT_SPEECH_TYPES = [
+  "impact_zt",
+  "seal_firm",
+  "seal_drop",
+  "seal_rise",
+  "zt_open",
+  "zt_smash",
+] as const;
 
 export interface FieldConfig {
   table_columns: string[];
@@ -155,12 +178,31 @@ export interface FieldConfig {
   speed_poll_interval_sec?: number;
   /** 连板天梯是否展示封板/回封/炸板时间 */
   ladder_show_times?: boolean;
+  /** 异动播报总开关 */
+  alert_speech_enabled?: boolean;
+  /** 异动播报类型 */
+  alert_speech_types?: string[];
+  /** 异动播报轮询间隔（秒） */
+  alert_speech_interval_sec?: number;
 }
 
 export interface UserConfig {
   fields: FieldConfig;
+  watchlist?: string[];
+  watchlist_pinned?: string[];
+  alertlist?: string[];
+  alertlist_pinned?: string[];
   extra: Record<string, unknown>;
 }
+
+export const ALERT_TYPE_LABELS: Record<string, string> = {
+  impact_zt: "冲击涨停",
+  seal_firm: "封死涨停",
+  seal_drop: "封涨大减",
+  seal_rise: "封涨大增",
+  zt_open: "涨停打开",
+  zt_smash: "涨停被砸",
+};
 
 export function formatMoney(v?: number | null): string {
   if (v == null || Number.isNaN(v)) return "—";

@@ -18,13 +18,14 @@ import { SpeedRankPanel } from "./components/SpeedRankPanel";
 import { StockChartModal } from "./components/StockChartModal";
 import { StockDetailDrawer } from "./components/StockDetailDrawer";
 import { SummaryBar } from "./components/SummaryBar";
+import { AlertBroadcastPanel } from "./components/AlertBroadcastPanel";
 import { WatchlistPanel } from "./components/WatchlistPanel";
 import { useMarketSocket } from "./hooks/useMarketSocket";
 import { useSpeech } from "./hooks/useSpeech";
 import { cacheGet, cachePurgeExpired, cacheSet } from "./lib/localCache";
 import { applyThemeToDom, loadTheme, saveTheme, type ThemeMode } from "./lib/theme";
-import type { FieldConfig, StockItem, UserConfig } from "./types";
-import { tradeDateLabel } from "./types";
+import type { AlertEvent, FieldConfig, StockItem, UserConfig } from "./types";
+import { DEFAULT_ALERT_SPEECH_TYPES, tradeDateLabel } from "./types";
 import "./App.css";
 
 const defaultFields: FieldConfig = {
@@ -58,9 +59,12 @@ const defaultFields: FieldConfig = {
   poll_interval_sec: 2.5,
   speed_poll_interval_sec: 1.5,
   ladder_show_times: true,
+  alert_speech_enabled: true,
+  alert_speech_types: [...DEFAULT_ALERT_SPEECH_TYPES],
+  alert_speech_interval_sec: 1,
 };
 
-type MainTab = "monitor" | "ladder" | "watch" | "speed" | "history" | "risk";
+type MainTab = "monitor" | "ladder" | "watch" | "alert" | "speed" | "history" | "risk";
 
 function findPoolTab(
   snapshot: { zt: StockItem[]; lb: StockItem[]; zb: StockItem[]; dt: StockItem[] },
@@ -92,7 +96,11 @@ export default function App() {
   const [, startTransition] = useTransition();
 
   const pushRef = useRef<(events: import("./types").SpeechEvent[]) => void>(() => undefined);
-  const { snapshot: rawSnapshot, connected } = useMarketSocket((events) => pushRef.current(events));
+  const pushAlertRef = useRef<(events: AlertEvent[]) => void>(() => undefined);
+  const { snapshot: rawSnapshot, connected } = useMarketSocket(
+    (events) => pushRef.current(events),
+    (events) => pushAlertRef.current(events),
+  );
   const [snapshot, setSnapshot] = useState(rawSnapshot);
 
   useEffect(() => {
@@ -116,8 +124,14 @@ export default function App() {
     setHistoryDate((prev) => resolveHistoryDate(prev || snapshot.trade_date));
   }, [snapshot.trade_date]);
 
-  const { push } = useSpeech(fields.speech_enabled, fields.speech_types);
+  const { push, pushAlert } = useSpeech(
+    fields.speech_enabled,
+    fields.speech_types,
+    fields.alert_speech_enabled !== false,
+    fields.alert_speech_types ?? [...DEFAULT_ALERT_SPEECH_TYPES],
+  );
   pushRef.current = push;
+  pushAlertRef.current = pushAlert;
 
   const toggleTheme = useCallback(() => {
     setThemeMode((prev) => {
@@ -172,7 +186,17 @@ export default function App() {
     fetch("/api/config")
       .then((r) => r.json())
       .then((data: { config: UserConfig; available_fields: Record<string, string> }) => {
-        if (data.config?.fields) setFields({ ...defaultFields, ...data.config.fields });
+        if (data.config?.fields) {
+          const merged = { ...defaultFields, ...data.config.fields };
+          // 升级：旧配置缺「封涨大增」时，若原先几乎全开则自动补上
+          const types = [...(merged.alert_speech_types || [])];
+          if (!types.includes("seal_rise") && types.includes("seal_drop")) {
+            const idx = types.indexOf("seal_drop");
+            types.splice(idx + 1, 0, "seal_rise");
+            merged.alert_speech_types = types;
+          }
+          setFields(merged);
+        }
         if (data.available_fields) setAvailable(data.available_fields);
       })
       .catch(() => undefined);
@@ -191,6 +215,15 @@ export default function App() {
       setFields(v);
     }
   }, []);
+
+  const toggleAlertSpeech = useCallback(
+    (on: boolean) => {
+      const next = { ...fields, alert_speech_enabled: on };
+      setFields(next);
+      void saveFields(next);
+    },
+    [fields, saveFields],
+  );
 
   const firstBoard = useMemo(
     () => snapshot.zt.filter((s) => (s.board_count || 1) <= 1),
@@ -258,6 +291,7 @@ export default function App() {
                 { label: "连板天梯", value: "ladder" },
                 { label: "避雷啦", value: "risk" },
                 { label: "重点观察", value: "watch" },
+                { label: "异动播报", value: "alert" },
                 { label: "涨速榜", value: "speed" },
                 { label: "历史回溯", value: "history" },
               ]}
@@ -322,6 +356,18 @@ export default function App() {
               onRowClick={openDetail}
               selectedCode={selectedCode}
               pollSec={fields.poll_interval_sec ?? 2.5}
+            />
+          </section>
+        ) : mainTab === "alert" ? (
+          <section className="panel">
+            <AlertBroadcastPanel
+              feed={snapshot.alert_feed || []}
+              fields={fields}
+              onToggleSpeech={toggleAlertSpeech}
+              onOpenSettings={() => setSettingsOpen(true)}
+              onRowClick={openDetail}
+              onOpenChart={setChartStock}
+              selectedCode={selectedCode}
             />
           </section>
         ) : mainTab === "risk" ? (

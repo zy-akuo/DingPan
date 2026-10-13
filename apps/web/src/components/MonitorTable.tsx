@@ -207,6 +207,7 @@ export function MonitorTable({
   onOpenChart,
   extraActions,
   scrollY = "calc(100vh - 340px)",
+  rowClassName,
 }: {
   data: StockItem[];
   columns: string[];
@@ -215,6 +216,7 @@ export function MonitorTable({
   onOpenChart?: (s: StockItem) => void;
   extraActions?: (s: StockItem) => ReactNode;
   scrollY?: number | string;
+  rowClassName?: (r: StockItem) => string;
 }) {
   const cols = useMemo(
     () => buildColumns(columns, onOpenChart, extraActions),
@@ -251,7 +253,13 @@ export function MonitorTable({
         scroll={{ y: scrollY, x: 1000 }}
         dataSource={data}
         columns={cols}
-        rowClassName={(r) => (r.code === selectedCode ? "monitor-row-selected" : "")}
+        rowClassName={(r) =>
+          rowClassName
+            ? rowClassName(r)
+            : r.code === selectedCode
+              ? "monitor-row-selected"
+              : ""
+        }
         onRow={(record) => ({
           onClick: () => onRowClick(record),
         })}

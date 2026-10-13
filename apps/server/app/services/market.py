@@ -24,6 +24,7 @@ from ..db import (
     upsert_zt_history,
 )
 from ..models import (
+    AlertEvent,
     HistoryGroup,
     LadderGroup,
     MarketSnapshot,
@@ -32,6 +33,17 @@ from ..models import (
     StockItem,
     StockStatus,
 )
+
+# 异动播报阈值
+_ALERT_MIN_SEAL = 5e5  # 有效封单下限（元）
+_ALERT_SEAL_DROP_RATIO = 0.30
+_ALERT_SEAL_DROP_ABS = 3e6  # 绝对减少下限
+_ALERT_SEAL_RISE_RATIO = 0.30
+_ALERT_SEAL_RISE_ABS = 3e6  # 绝对增加下限
+_ALERT_SMASH_SEAL = 3e7  # 开板前封单较大视为被砸
+_ALERT_SMASH_AMOUNT_JUMP = 2e7  # 开板瞬间成交额跃升
+_ALERT_FEED_MAX = 400
+_PRICE_EPS = 0.015
 
 
 def _is_trading_time(now: datetime | None = None) -> bool:
@@ -149,6 +161,9 @@ class MarketService:
         self._risk_map: dict[str, dict[str, Any]] = {}
         self._risk_updated_at: str = ""
         self._risk_source: str = ""
+        # 异动播报状态：code -> {sealed, touched, seal_peak, seal, amount, name, board, industry}
+        self._alert_state: dict[str, dict[str, Any]] = {}
+        self._alert_trade_date: str = ""
 
     def subscribe(self) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue(maxsize=4)
@@ -560,6 +575,7 @@ class MarketService:
             except Exception:
                 quotes = {}
 
+        # 置顶优先：调用方可先排好序；此处保持传入 codes 顺序
         out: list[StockItem] = []
         for code in codes:
             if code in pool_map:
@@ -1081,6 +1097,13 @@ class MarketService:
             self._apply_risk_to_lists(zt, lb, zb, dt)
             self._apply_risk_to_ladder(ladder)
 
+            # 保留异动流水；行情轮询不附带新异动事件
+            prev_feed = list(self.snapshot.alert_feed or [])
+            if self._alert_trade_date and self._alert_trade_date != date:
+                prev_feed = []
+                self._alert_state.clear()
+            self._alert_trade_date = date
+
             self.snapshot = MarketSnapshot(
                 trade_date=date,
                 updated_at=datetime.now().isoformat(timespec="seconds"),
@@ -1091,6 +1114,8 @@ class MarketService:
                 dt=dt,
                 ladder=ladder,
                 speech_events=speech,
+                alert_events=[],
+                alert_feed=prev_feed,
             )
 
             try:
@@ -1098,6 +1123,8 @@ class MarketService:
             except Exception:
                 pass
             await self._broadcast()
+            # 播报事件只推一次，避免基本面补齐等再次广播时轮播
+            self.snapshot.speech_events = []
             return self.snapshot
 
     async def poll_loop(self, interval_trading: float, interval_idle: float) -> None:
@@ -1131,6 +1158,277 @@ class MarketService:
                 user_iv = interval_trading
             user_iv = max(1.0, min(30.0, user_iv))
             delay = user_iv if _is_trading_time() else interval_idle
+            await asyncio.sleep(delay)
+
+    @staticmethod
+    def _board_label(board_count: int) -> str:
+        return "首板" if board_count <= 1 else f"{board_count}连板"
+
+    def _alert_meta_for(self, code: str) -> tuple[int, str, str]:
+        """从当前快照取板数/行业/名称提示。"""
+        snap = self.snapshot
+        for lst in (snap.zt, snap.lb, snap.zb, snap.dt):
+            for s in lst:
+                if s.code == code:
+                    ind = (s.industry or (s.concepts[0] if s.concepts else "") or "").strip()
+                    return int(s.board_count or 1), ind, s.name or ""
+        return 1, "", ""
+
+    def _diff_alert_events(
+        self,
+        quotes: dict[str, dict[str, Any]],
+        pinned: set[str],
+    ) -> list[AlertEvent]:
+        now_t = datetime.now().strftime("%H:%M:%S")
+        events: list[AlertEvent] = []
+
+        for code, q in quotes.items():
+            price = float(q.get("price") or 0)
+            limit_up = float(q.get("limit_up") or 0)
+            buy1 = float(q.get("buy1") or 0)
+            seal = float(q.get("seal_amount") or 0)
+            amount = float(q.get("amount") or 0)
+            name = str(q.get("name") or "")
+            board_count, industry, pool_name = self._alert_meta_for(code)
+            if pool_name:
+                name = name or pool_name
+            industry = industry or str(q.get("industry") or "")
+            # 池内封单优先
+            for lst in (self.snapshot.zt, self.snapshot.lb):
+                hit_seal = False
+                for s in lst:
+                    if s.code == code and float(s.seal_amount or 0) > 0:
+                        seal = float(s.seal_amount)
+                        hit_seal = True
+                        break
+                if hit_seal:
+                    break
+
+            if limit_up <= 0 or price <= 0:
+                continue
+
+            at_limit = price + _PRICE_EPS >= limit_up
+            buy_at_limit = buy1 + _PRICE_EPS >= limit_up
+            # 价在涨停且封单有效即可；买一偶发为 0 时仍用封单额判定，避免封/开抖动
+            raw_sealed = at_limit and seal >= _ALERT_MIN_SEAL and (
+                buy_at_limit or seal >= _ALERT_MIN_SEAL * 2
+            )
+
+            st = self._alert_state.get(code) or {
+                "sealed": False,
+                "touched": False,
+                "seal_peak": 0.0,
+                "seal_trough": 0.0,
+                "seal": 0.0,
+                "amount": 0.0,
+                "seal_confirm": 0,
+                "open_confirm": 0,
+            }
+            prev_sealed = bool(st.get("sealed"))
+            prev_seal = float(st.get("seal") or 0)
+            prev_amount = float(st.get("amount") or 0)
+            peak = float(st.get("seal_peak") or 0)
+            trough = float(st.get("seal_trough") or 0)
+            touched = bool(st.get("touched"))
+            seal_confirm = int(st.get("seal_confirm") or 0)
+            open_confirm = int(st.get("open_confirm") or 0)
+
+            # 连续 2 拍确认再切换封板状态，抑制盘口抖动轮播
+            if raw_sealed:
+                seal_confirm = min(seal_confirm + 1, 3)
+                open_confirm = 0
+            else:
+                open_confirm = min(open_confirm + 1, 3)
+                seal_confirm = 0
+
+            if prev_sealed:
+                sealed = open_confirm < 2
+            else:
+                sealed = seal_confirm >= 2
+
+            board_label = self._board_label(board_count)
+            common = {
+                "code": code,
+                "name": name or code,
+                "board_count": board_count,
+                "board_label": board_label,
+                "time": now_t,
+                "industry": industry,
+            }
+
+            if at_limit and not sealed and not touched and not raw_sealed:
+                events.append(
+                    AlertEvent(
+                        type="impact_zt",
+                        text=f"{name or code}冲击涨停",
+                        detail=f"成交额{_fmt_money(amount)}" if amount > 0 else "",
+                        **common,
+                    )
+                )
+                touched = True
+
+            if sealed and not prev_sealed:
+                events.append(
+                    AlertEvent(
+                        type="seal_firm",
+                        text=f"{name or code}封死涨停",
+                        detail=f"涨停封单{_fmt_money(seal)}",
+                        **common,
+                    )
+                )
+                peak = seal
+                trough = seal
+                touched = True
+
+            if sealed and prev_sealed and seal > 0:
+                # 峰值/谷值单向更新，避免小幅波动反复触发大增/大减
+                if seal >= peak:
+                    peak = seal
+                if trough <= 0 or seal <= trough:
+                    trough = seal
+
+                dropped = (
+                    peak > 0
+                    and seal <= peak * (1.0 - _ALERT_SEAL_DROP_RATIO)
+                    and (peak - seal) >= _ALERT_SEAL_DROP_ABS
+                )
+                risen = (
+                    trough > 0
+                    and seal >= trough * (1.0 + _ALERT_SEAL_RISE_RATIO)
+                    and (seal - trough) >= _ALERT_SEAL_RISE_ABS
+                )
+                if dropped and not risen:
+                    events.append(
+                        AlertEvent(
+                            type="seal_drop",
+                            text=f"{name or code}封涨大减",
+                            detail=f"剩余封单{_fmt_money(seal)}",
+                            **common,
+                        )
+                    )
+                    peak = seal
+                    trough = seal
+                elif risen and not dropped:
+                    events.append(
+                        AlertEvent(
+                            type="seal_rise",
+                            text=f"{name or code}封涨大增",
+                            detail=f"涨停封单{_fmt_money(seal)}",
+                            **common,
+                        )
+                    )
+                    peak = seal
+                    trough = seal
+
+            if prev_sealed and not sealed:
+                amount_jump = amount - prev_amount if amount > prev_amount else 0.0
+                smash = prev_seal >= _ALERT_SMASH_SEAL or amount_jump >= _ALERT_SMASH_AMOUNT_JUMP
+                if smash:
+                    events.append(
+                        AlertEvent(
+                            type="zt_smash",
+                            text=f"{name or code}涨停被砸",
+                            detail=f"成交额{_fmt_money(amount)}" if amount > 0 else "",
+                            **common,
+                        )
+                    )
+                else:
+                    events.append(
+                        AlertEvent(
+                            type="zt_open",
+                            text=f"{name or code}涨停打开",
+                            detail=f"成交额{_fmt_money(amount)}" if amount > 0 else "",
+                            **common,
+                        )
+                    )
+                peak = 0.0
+                trough = 0.0
+
+            self._alert_state[code] = {
+                "sealed": sealed,
+                "touched": touched or at_limit,
+                "seal_peak": peak,
+                "seal_trough": trough,
+                "seal": seal,
+                "amount": amount,
+                "name": name,
+                "seal_confirm": seal_confirm,
+                "open_confirm": open_confirm,
+            }
+
+        # 置顶股事件优先
+        if pinned and events:
+            events.sort(key=lambda e: (0 if e.code in pinned else 1))
+        return events
+
+    async def refresh_alerts(self) -> list[AlertEvent]:
+        from ..db import load_user_config
+
+        try:
+            cfg = load_user_config()
+        except Exception:
+            return []
+        codes = list(cfg.alertlist or [])
+        if not codes:
+            return []
+        pinned = set(cfg.alertlist_pinned or [])
+
+        try:
+            quotes = await self.client.fetch_quotes_tencent_batch(codes)
+        except Exception:
+            quotes = {}
+        if not quotes:
+            return []
+
+        # 补齐池内行业到 quote（名称已有）
+        for code, q in list(quotes.items()):
+            _, industry, pool_name = self._alert_meta_for(code)
+            if industry and not q.get("industry"):
+                q["industry"] = industry
+            if pool_name and not q.get("name"):
+                q["name"] = pool_name
+
+        new_events = self._diff_alert_events(quotes, pinned)
+        if not new_events:
+            return []
+
+        try:
+            enabled_types = set(cfg.fields.alert_speech_types or [])
+        except Exception:
+            enabled_types = set()
+        if enabled_types:
+            new_events = [e for e in new_events if e.type in enabled_types]
+        if not new_events:
+            return []
+
+        feed = list(new_events) + list(self.snapshot.alert_feed or [])
+        self.snapshot.alert_feed = feed[:_ALERT_FEED_MAX]
+        self.snapshot.alert_events = list(new_events)
+        await self._broadcast()
+        # 推送后清空本轮标记，避免行情广播重复播报
+        self.snapshot.alert_events = []
+        return new_events
+
+    async def alert_loop(self) -> None:
+        from ..db import load_user_config
+
+        while True:
+            delay = 1.0
+            try:
+                cfg = load_user_config()
+                delay = float(getattr(cfg.fields, "alert_speech_interval_sec", None) or 1.0)
+            except Exception:
+                delay = 1.0
+            delay = max(0.5, min(5.0, delay))
+
+            if _is_trading_time():
+                try:
+                    await self.refresh_alerts()
+                except Exception:
+                    pass
+            else:
+                delay = max(delay, 5.0)
+
             await asyncio.sleep(delay)
 
     async def _merge_and_enqueue_funds(self, stocks: list[StockItem]) -> None:
