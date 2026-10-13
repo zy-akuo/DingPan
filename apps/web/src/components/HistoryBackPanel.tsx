@@ -298,9 +298,11 @@ export function HistoryBackPanel({
       .map((g) => {
         let stocks = (g.stocks || []).filter(filterStock);
         if (activeConcept) {
-          stocks = stocks.filter(
-            (s) => (s.reason || s.industry || "") === activeConcept,
-          );
+          stocks = stocks.filter((s) => {
+            const primary = (s.reason || s.industry || "").trim();
+            if (primary === activeConcept) return true;
+            return (s.concepts || []).some((c) => c === activeConcept);
+          });
         }
         if (!stocks.length && (kw.trim() || activeConcept)) return null;
         return { ...g, stocks, count: stocks.length };
@@ -572,7 +574,7 @@ export function HistoryBackPanel({
         ) : (
           <>
             <div className="kpl-concept-strip">
-              {conceptGroups.slice(0, 12).map((g) => (
+              {conceptGroups.map((g) => (
                 <button
                   key={g.key}
                   type="button"
