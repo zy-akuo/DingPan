@@ -442,6 +442,7 @@ export function HistoryBackPanel({
       if (e.button !== 0) return;
       const el = conceptStripRef.current;
       if (!el) return;
+      // 仅记录起点；真正拖动后再 capture / 禁点击，避免点选概念失效
       conceptDrag.current = {
         active: true,
         moved: false,
@@ -449,12 +450,6 @@ export function HistoryBackPanel({
         scrollLeft: el.scrollLeft,
         pointerId: e.pointerId,
       };
-      el.classList.add("is-dragging");
-      try {
-        el.setPointerCapture(e.pointerId);
-      } catch {
-        /* ignore */
-      }
     },
     [],
   );
@@ -465,8 +460,16 @@ export function HistoryBackPanel({
       const el = conceptStripRef.current;
       if (!drag.active || !el) return;
       const dx = e.clientX - drag.startX;
-      if (Math.abs(dx) > 4) drag.moved = true;
-      if (!drag.moved) return;
+      if (!drag.moved) {
+        if (Math.abs(dx) <= 6) return;
+        drag.moved = true;
+        el.classList.add("is-dragging");
+        try {
+          el.setPointerCapture(drag.pointerId ?? e.pointerId);
+        } catch {
+          /* ignore */
+        }
+      }
       el.scrollLeft = drag.scrollLeft - dx;
       e.preventDefault();
     },
@@ -476,7 +479,7 @@ export function HistoryBackPanel({
   const endConceptStripDrag = useCallback(() => {
     const el = conceptStripRef.current;
     const drag = conceptDrag.current;
-    if (el && drag.pointerId != null) {
+    if (el && drag.moved && drag.pointerId != null) {
       try {
         el.releasePointerCapture(drag.pointerId);
       } catch {
@@ -484,7 +487,7 @@ export function HistoryBackPanel({
       }
     }
     el?.classList.remove("is-dragging");
-    // 保留 moved 到 click 判定后再清
+    // 保留 moved 到 click 判定后再清，避免拖动松手误触筛选
     drag.active = false;
     drag.pointerId = null;
     window.setTimeout(() => {
