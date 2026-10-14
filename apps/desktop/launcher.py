@@ -1,6 +1,7 @@
 """Desktop launcher: build frontend if stale, start FastAPI, open pywebview window."""
 from __future__ import annotations
 
+import ctypes
 import os
 import shutil
 import socket
@@ -130,7 +131,37 @@ def _wait_port(host: str, port: int, timeout: float = 45.0) -> bool:
     return False
 
 
+def _window_icon() -> str | None:
+    """与浏览器 tab 同源的 favicon.ico（Windows 窗口标题栏/任务栏）。"""
+    here = Path(__file__).resolve().parent
+    meipass = Path(getattr(sys, "_MEIPASS", here))
+    candidates = [
+        here / "favicon.ico",
+        here.parent / "web" / "public" / "favicon.ico",
+        here.parent / "server" / "web_dist" / "favicon.ico",
+        meipass / "favicon.ico",
+        meipass / "web_dist" / "favicon.ico",
+    ]
+    for c in candidates:
+        if c.is_file():
+            return str(c)
+    return None
+
+
+def _set_windows_app_id(app_id: str = "DingPan.Desktop") -> None:
+    """让任务栏按独立应用显示 Form.Icon，而不是归组到 python.exe。"""
+    if sys.platform != "win32":
+        return
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
+    except Exception:
+        pass
+
+
 def main() -> None:
+    # 必须在创建任何窗口之前调用，否则任务栏仍用 Python 图标
+    _set_windows_app_id()
+
     ensure_frontend_build()
     server_root = _server_root()
     env = os.environ.copy()
@@ -150,14 +181,16 @@ def main() -> None:
             raise RuntimeError("后端服务启动超时，请检查端口占用或依赖安装")
         import webview
 
+        # pywebview 6.x：icon 在 start()，不在 create_window()
+        icon = _window_icon()
         webview.create_window(
-            "钉盘 · A股涨停盯盘",
+            "盯盘 · A股涨停盯盘",
             f"http://{HOST}:{PORT}/",
             width=1400,
             height=900,
             min_size=(1100, 700),
         )
-        webview.start()
+        webview.start(**({"icon": icon} if icon else {}))
     finally:
         proc.terminate()
         try:

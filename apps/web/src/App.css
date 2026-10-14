@@ -397,6 +397,18 @@ body {
   overflow-x: auto;
   padding: 8px 4px 4px;
   margin-bottom: 4px;
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: pan-y;
+}
+
+.kpl-concept-strip.is-dragging {
+  cursor: grabbing;
+}
+
+.kpl-concept-strip.is-dragging .kpl-concept-card {
+  pointer-events: none;
 }
 
 .kpl-concept-card {

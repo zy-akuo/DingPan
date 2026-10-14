@@ -103,6 +103,10 @@ Copy-Item -Recurse -Force (Join-Path $WebDist "*") (Join-Path $Out "resources\we
 Copy-Item -Recurse -Force (Join-Path $ServerSrc "app") (Join-Path $Out "resources\server\app")
 Copy-Item -Force (Join-Path $ServerSrc "requirements.txt") (Join-Path $Out "resources\server\requirements.txt")
 Copy-Item -Force (Join-Path $Root "apps\desktop\launcher.py") (Join-Path $Out "DingPan.py")
+$iconSrc = Join-Path $Root "apps\desktop\favicon.ico"
+if (Test-Path $iconSrc) {
+    Copy-Item -Force $iconSrc (Join-Path $Out "favicon.ico")
+}
 Copy-Item -Recurse -Force $WebDist (Join-Path $Out "resources\server\web_dist")
 
 # docs for end users
@@ -203,7 +207,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\stop-dingpan.p
 pause
 "@
     Set-Content -Path (Join-Path $Out "DingPan-Stop.bat") -Value $stopBat -Encoding ASCII
-    cmd /c "copy /Y `"$Out\DingPan-Stop.bat`" `"$Out\停止钉盘.bat`"" | Out-Null
+    cmd /c "copy /Y `"$Out\DingPan-Stop.bat`" `"$Out\停止盯盘.bat`"" | Out-Null
 }
 
 $ZipPath = Join-Path $PSScriptRoot "out\DingPan-portable.zip"

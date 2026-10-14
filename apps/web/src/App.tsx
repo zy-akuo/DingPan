@@ -285,7 +285,7 @@ export default function App() {
       <div className={`app theme-${themeMode}`}>
         <header className="topbar">
           <div className="brand">
-            <span className="logo">钉盘</span>
+            <span className="logo">盯盘</span>
             <span className="sub">A股涨停实时盯盘</span>
             <Tag color={connected ? "success" : "default"}>
               {connected ? "已连接" : "重连中"}

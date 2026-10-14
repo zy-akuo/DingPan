@@ -17,7 +17,15 @@ import {
 import dayjs, { type Dayjs } from "dayjs";
 import customParseFormat from "dayjs/plugin/customParseFormat";
 import "dayjs/locale/zh-cn";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import { matchNameOrInitials } from "../lib/stockMatch";
 import type {
   HistoryGroup,
@@ -211,6 +219,14 @@ export function HistoryBackPanel({
   const stockSearchTimer = useRef<number | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const hitChipRef = useRef<HTMLDivElement | null>(null);
+  const conceptStripRef = useRef<HTMLDivElement | null>(null);
+  const conceptDrag = useRef<{
+    active: boolean;
+    moved: boolean;
+    startX: number;
+    scrollLeft: number;
+    pointerId: number | null;
+  }>({ active: false, moved: false, startX: 0, scrollLeft: 0, pointerId: null });
 
   const displayCols = useMemo(() => ensureReasonColumn(columns), [columns]);
   const dateValue = useMemo(() => fromYmd(date), [date]);
@@ -420,6 +436,73 @@ export function HistoryBackPanel({
     setStockResult(null);
     setHighlightCode(null);
   }, []);
+
+  const onConceptStripPointerDown = useCallback(
+    (e: ReactPointerEvent<HTMLDivElement>) => {
+      if (e.button !== 0) return;
+      const el = conceptStripRef.current;
+      if (!el) return;
+      conceptDrag.current = {
+        active: true,
+        moved: false,
+        startX: e.clientX,
+        scrollLeft: el.scrollLeft,
+        pointerId: e.pointerId,
+      };
+      el.classList.add("is-dragging");
+      try {
+        el.setPointerCapture(e.pointerId);
+      } catch {
+        /* ignore */
+      }
+    },
+    [],
+  );
+
+  const onConceptStripPointerMove = useCallback(
+    (e: ReactPointerEvent<HTMLDivElement>) => {
+      const drag = conceptDrag.current;
+      const el = conceptStripRef.current;
+      if (!drag.active || !el) return;
+      const dx = e.clientX - drag.startX;
+      if (Math.abs(dx) > 4) drag.moved = true;
+      if (!drag.moved) return;
+      el.scrollLeft = drag.scrollLeft - dx;
+      e.preventDefault();
+    },
+    [],
+  );
+
+  const endConceptStripDrag = useCallback(() => {
+    const el = conceptStripRef.current;
+    const drag = conceptDrag.current;
+    if (el && drag.pointerId != null) {
+      try {
+        el.releasePointerCapture(drag.pointerId);
+      } catch {
+        /* ignore */
+      }
+    }
+    el?.classList.remove("is-dragging");
+    // 保留 moved 到 click 判定后再清
+    drag.active = false;
+    drag.pointerId = null;
+    window.setTimeout(() => {
+      conceptDrag.current.moved = false;
+    }, 0);
+  }, []);
+
+  const onConceptCardClick = useCallback(
+    (e: ReactMouseEvent<HTMLButtonElement>, label: string) => {
+      if (conceptDrag.current.moved) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+      setActiveConcept((prev) => (prev === label ? null : label));
+    },
+    [],
+  );
 
   const onStockSuggest = useCallback((text: string) => {
     setStockKw(text);
@@ -690,7 +773,16 @@ export function HistoryBackPanel({
           />
         ) : (
           <>
-            <div className="kpl-concept-strip">
+            <div
+              ref={conceptStripRef}
+              className="kpl-concept-strip"
+              title="按住拖动左右查看"
+              onPointerDown={onConceptStripPointerDown}
+              onPointerMove={onConceptStripPointerMove}
+              onPointerUp={endConceptStripDrag}
+              onPointerCancel={endConceptStripDrag}
+              onLostPointerCapture={endConceptStripDrag}
+            >
               {conceptGroups.map((g) => (
                 <button
                   key={g.key}
@@ -700,9 +792,7 @@ export function HistoryBackPanel({
                       ? "kpl-concept-card active"
                       : "kpl-concept-card"
                   }
-                  onClick={() =>
-                    setActiveConcept((prev) => (prev === g.label ? null : g.label))
-                  }
+                  onClick={(e) => onConceptCardClick(e, g.label)}
                 >
                   <div className="kpl-concept-title">
                     {g.label} <span>({g.count})</span>
