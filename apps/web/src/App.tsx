@@ -270,13 +270,15 @@ export default function App() {
       theme={{
         algorithm: isDark ? antTheme.darkAlgorithm : antTheme.defaultAlgorithm,
         token: {
-          colorPrimary: "#f97316",
+          colorPrimary: isDark ? "#f97316" : "#d97706",
           borderRadius: 4,
           fontFamily:
             '"Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
-          colorBgContainer: isDark ? "#12181f" : "#ffffff",
-          colorBgElevated: isDark ? "#161d26" : "#ffffff",
-          colorBorder: isDark ? "#1e2730" : "#d8dee6",
+          colorBgContainer: isDark ? "#12181f" : "#f3f4f6",
+          colorBgElevated: isDark ? "#161d26" : "#f3f4f6",
+          colorBorder: isDark ? "#1e2730" : "#c0c6d0",
+          colorText: isDark ? "#e6edf3" : "#2a3038",
+          colorBgLayout: isDark ? "#0b0f14" : "#e4e7eb",
         },
       }}
     >
