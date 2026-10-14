@@ -1,4 +1,4 @@
-import { AutoComplete, Button, Input, Space, message } from "antd";
+import { AutoComplete, Button, Input, Popconfirm, Space, message } from "antd";
 import { DeleteOutlined, PushpinFilled, PushpinOutlined } from "@ant-design/icons";
 import {
   startTransition,
@@ -228,17 +228,26 @@ export function WatchlistPanel({
             togglePin(s.code);
           }}
         />
-        <Button
-          type="text"
-          size="small"
-          danger
-          icon={<DeleteOutlined />}
-          title="移出观察"
-          onClick={(e) => {
-            e.stopPropagation();
+        <Popconfirm
+          title={`移出观察「${s.name}」？`}
+          okText="移出"
+          cancelText="取消"
+          okButtonProps={{ danger: true }}
+          onConfirm={(e) => {
+            e?.stopPropagation();
             removeStock(s.code);
           }}
-        />
+          onCancel={(e) => e?.stopPropagation()}
+        >
+          <Button
+            type="text"
+            size="small"
+            danger
+            icon={<DeleteOutlined />}
+            title="移出观察"
+            onClick={(e) => e.stopPropagation()}
+          />
+        </Popconfirm>
       </span>
     ),
     [pinSet, togglePin, removeStock],

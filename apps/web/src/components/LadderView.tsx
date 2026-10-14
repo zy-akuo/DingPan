@@ -24,6 +24,21 @@ function matchDisplayMode(status: string, mode: DisplayMode): boolean {
   return status === "炸";
 }
 
+/** 成 → 炸 → 败；晋级失败按涨跌幅从大到小 */
+function sortLadderStocks(stocks: StockItem[]): StockItem[] {
+  const rank = (s: StockItem) =>
+    s.status === "成" ? 0 : s.status === "炸" ? 1 : 2;
+  return [...stocks].sort((a, b) => {
+    const ra = rank(a);
+    const rb = rank(b);
+    if (ra !== rb) return ra - rb;
+    if (a.status === "败" && b.status === "败") {
+      return Number(b.change_pct || 0) - Number(a.change_pct || 0);
+    }
+    return 0;
+  });
+}
+
 function timeToSec(t: string): number | null {
   const s = (t || "").trim();
   if (!s) return null;
@@ -66,7 +81,7 @@ function breakTimeOf(s: StockItem): string {
 function StatusBadge({ status }: { status: string }) {
   if (status === "成") return <span className="badge badge-ok">成</span>;
   if (status === "炸") return <span className="badge badge-broken">炸</span>;
-  return <span className="badge-fail">(败)</span>;
+  return <span className="badge badge-fail">败</span>;
 }
 
 function StockTimeLine({ stock }: { stock: StockItem }) {
@@ -167,7 +182,9 @@ export function LadderView({
     () =>
       groups.map((g) => ({
         ...g,
-        stocks: g.stocks.filter((s) => matchDisplayMode(s.status, displayMode)),
+        stocks: sortLadderStocks(
+          g.stocks.filter((s) => matchDisplayMode(s.status, displayMode)),
+        ),
       })),
     [groups, displayMode],
   );

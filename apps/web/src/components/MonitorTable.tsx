@@ -21,13 +21,22 @@ function buildColumns(
     name: {
       title: "名称",
       dataIndex: "name",
-      width: 168,
+      width: extraActions ? 196 : 168,
       fixed: "left",
       render: (_, r) => (
-        <div className="name-cell">
+        <div className={`name-cell${extraActions ? " name-cell-actions" : ""}`}>
           <div className="name-row">
             <span className="mkt">{r.market}</span>
             <span className="nm">{r.name}</span>
+            {extraActions ? (
+              <span
+                className="name-extra"
+                onClick={(e) => e.stopPropagation()}
+                onKeyDown={(e) => e.stopPropagation()}
+              >
+                {extraActions(r)}
+              </span>
+            ) : null}
             <RiskBadge tags={r.risk_tags} hint={r.risk_hint} />
             {onOpenChart ? (
               <Button
@@ -41,15 +50,6 @@ function buildColumns(
                   onOpenChart(r);
                 }}
               />
-            ) : null}
-            {extraActions ? (
-              <span
-                className="name-extra"
-                onClick={(e) => e.stopPropagation()}
-                onKeyDown={(e) => e.stopPropagation()}
-              >
-                {extraActions(r)}
-              </span>
             ) : null}
           </div>
           <div className="code">{r.code}</div>
