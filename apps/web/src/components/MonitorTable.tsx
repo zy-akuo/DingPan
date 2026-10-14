@@ -1,7 +1,13 @@
 import { LineChartOutlined } from "@ant-design/icons";
 import { Button, Table, Tag } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { useEffect, useMemo, useRef, type ReactNode } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  type ReactNode,
+} from "react";
 import type { StockItem } from "../types";
 import { formatMoney, formatPct, formatVolume } from "../types";
 import { RiskBadge } from "./RiskPanel";
@@ -208,6 +214,7 @@ export function MonitorTable({
   extraActions,
   scrollY = "calc(100vh - 340px)",
   rowClassName,
+  preserveScroll = false,
 }: {
   data: StockItem[];
   columns: string[];
@@ -217,12 +224,41 @@ export function MonitorTable({
   extraActions?: (s: StockItem) => ReactNode;
   scrollY?: number | string;
   rowClassName?: (r: StockItem) => string;
+  /** 高频刷新时锁定表体滚动位置，避免闪屏/跳动 */
+  preserveScroll?: boolean;
 }) {
   const cols = useMemo(
     () => buildColumns(columns, onOpenChart, extraActions),
     [columns, onOpenChart, extraActions],
   );
   const wrapRef = useRef<HTMLDivElement>(null);
+  const scrollTopRef = useRef(0);
+
+  useEffect(() => {
+    if (!preserveScroll) return;
+    const root = wrapRef.current;
+    if (!root) return;
+    const body = root.querySelector(".ant-table-body") as HTMLElement | null;
+    if (!body) return;
+    const onScroll = () => {
+      scrollTopRef.current = body.scrollTop;
+    };
+    scrollTopRef.current = body.scrollTop;
+    body.addEventListener("scroll", onScroll, { passive: true });
+    return () => body.removeEventListener("scroll", onScroll);
+  }, [preserveScroll]);
+
+  useLayoutEffect(() => {
+    if (!preserveScroll) return;
+    const body = wrapRef.current?.querySelector(
+      ".ant-table-body",
+    ) as HTMLElement | null;
+    if (!body) return;
+    const keep = scrollTopRef.current;
+    if (Math.abs(body.scrollTop - keep) > 0.5) {
+      body.scrollTop = keep;
+    }
+  }, [data, preserveScroll]);
 
   useEffect(() => {
     if (!selectedCode || !wrapRef.current) return;
@@ -239,7 +275,9 @@ export function MonitorTable({
       if (rowRect.top >= bodyRect.top && rowRect.bottom <= bodyRect.bottom) return;
       const delta =
         rowRect.top - bodyRect.top - body.clientHeight / 2 + rowRect.height / 2;
-      body.scrollTo({ top: Math.max(0, body.scrollTop + delta), behavior: "smooth" });
+      const nextTop = Math.max(0, body.scrollTop + delta);
+      body.scrollTo({ top: nextTop, behavior: "smooth" });
+      scrollTopRef.current = nextTop;
     }, 80);
     return () => window.clearTimeout(timer);
   }, [selectedCode]);

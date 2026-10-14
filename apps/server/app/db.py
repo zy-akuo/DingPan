@@ -222,6 +222,31 @@ async def purge_old_auction_dates(keep: int = 15) -> None:
 
 
 async def upsert_zt_history(trade_date: str, rows: list[dict]) -> None:
+    """写入某日涨停池；非空时裁掉当日已不在池内的代码，避免盘中误入/炸板残留。"""
+    ds = (trade_date or "").replace("-", "")[:8]
+    if len(ds) != 8 or not ds.isdigit():
+        return
+    if not rows:
+        return
+    payload = []
+    codes: set[str] = set()
+    for r in rows:
+        code = str(r.get("code") or "").zfill(6)
+        if not code.isdigit():
+            continue
+        codes.add(code)
+        payload.append(
+            (
+                ds,
+                code,
+                r.get("name"),
+                r.get("board_count", 1),
+                r.get("industry") or "",
+                _row_reason(r),
+            )
+        )
+    if not payload:
+        return
     async with aiosqlite.connect(settings.db_path) as db:
         await db.executemany(
             """
@@ -233,18 +258,19 @@ async def upsert_zt_history(trade_date: str, rows: list[dict]) -> None:
                 industry=COALESCE(NULLIF(excluded.industry, ''), zt_history.industry),
                 reason=COALESCE(NULLIF(excluded.reason, ''), zt_history.reason)
             """,
-            [
-                (
-                    trade_date,
-                    r["code"],
-                    r.get("name"),
-                    r.get("board_count", 1),
-                    r.get("industry") or "",
-                    _row_reason(r),
-                )
-                for r in rows
-            ],
+            payload,
         )
+        # 全量池覆盖：删除当日残留脏数据（如炸板后仍留在 history）
+        cur = await db.execute(
+            "SELECT code FROM zt_history WHERE trade_date=?", (ds,)
+        )
+        existing = {str(r[0]).zfill(6) for r in await cur.fetchall()}
+        stale = existing - codes
+        if stale:
+            await db.executemany(
+                "DELETE FROM zt_history WHERE trade_date=? AND code=?",
+                [(ds, c) for c in stale],
+            )
         await db.commit()
 
 

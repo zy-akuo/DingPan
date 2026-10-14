@@ -1280,6 +1280,16 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+/* 高轮询榜单/观察列表：减少滚动锚定跳动，数字等宽避免列宽抖 */
+.speed-panel .ant-table-body,
+.watch-panel .ant-table-body {
+  overflow-anchor: none;
+}
+.speed-panel .ant-table-tbody > tr > td,
+.watch-panel .ant-table-tbody > tr > td {
+  font-variant-numeric: tabular-nums;
+}
+
 .monitor-table-wrap .monitor-row-selected > td {
   background: var(--row-selected) !important;
 }

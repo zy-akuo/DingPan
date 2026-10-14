@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import re
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from typing import Any
 
 import httpx
@@ -93,6 +93,23 @@ def _price(raw: Any) -> float:
     if v > 1000:
         return round(v / 1000, 2)
     return round(v, 2)
+
+
+def infer_limit_up(code: str, name: str, prev_close: float) -> float:
+    """按板块规则由昨收推算涨停价（腾讯 limit_up 偶发为空时兜底）。"""
+    prev = float(prev_close or 0)
+    if prev <= 0:
+        return 0.0
+    code = (code or "").zfill(6)
+    risk = classify_risk_type(name or "")
+    if risk in ("st", "delist"):
+        ratio = 0.05
+    elif code.startswith(("300", "301", "688", "689")):
+        ratio = 0.20
+    else:
+        ratio = 0.10
+    # A 股涨停价：四舍五入到分
+    return round(prev * (1.0 + ratio) + 1e-8, 2)
 
 
 def _parse_zt_stats(raw: Any) -> str:
@@ -1879,15 +1896,43 @@ class EastMoneyClient:
 
     async def fetch_auction_limit_pool(self, date: str | None = None) -> list[dict[str, Any]]:
         """兼容旧名：转调全市场竞价观察池。"""
-        return await self.fetch_auction_market_pool(limit=200)
+        return await self.fetch_auction_market_pool(limit=350)
 
-    async def fetch_em_auction_yizhi(self) -> list[dict[str, Any]]:
-        """东方财富「集合竞价 → 竞价一字板」官方列表。
+    @staticmethod
+    def em_auction_yizhi_fresh(auction_time: str, now: datetime | None = None) -> bool:
+        """判断东财 jjyd 时间戳是否属于「当前竞价会话」，避免串入昨日 09:25 列表。
 
-        接口同 vipmoney 盯盘页：push2dycalc `/api/qt/jjyd/get` + sk=1。
-        口径：9:25 涨停价撮合且存在未匹配额（页面约 9:26 后更新）。
-        字段：f6=未匹配额(元)，f7=竞价涨幅%，f8=撮合价，f11=竞价成交额(元)。
+        - 09:15–09:24：仅接受时间落在 [09:15, 当前时刻] 的条目
+        - ≥09:25：接受 09:25:xx（官方竞价一字板落定）
         """
+        now = now or datetime.now()
+        at = (auction_time or "").strip()
+        if not at.startswith("09:"):
+            return False
+        parts = at.split(":")
+        try:
+            ath = int(parts[0])
+            atm = int(parts[1]) if len(parts) > 1 else 0
+            ats = int(parts[2]) if len(parts) > 2 else 0
+        except (TypeError, ValueError):
+            return False
+        stamp = time(ath, atm, min(ats, 59))
+        nt = now.time()
+        if nt < time(9, 25):
+            return time(9, 15) <= stamp <= nt
+        return ath == 9 and atm >= 25
+
+    async def fetch_em_auction_jjyd(
+        self, *, sk: str = "0", limit: int = 150
+    ) -> list[dict[str, Any]]:
+        """东方财富集合竞价 jjyd 官方榜。
+
+        - sk=0：按竞价涨幅(f7)降序的全市场竞价榜（对齐东财「集合竞价」涨幅排序）
+        - sk=1：竞价一字板（涨停撮合且有未匹配额）
+        字段：f6=未匹配额(元，一字有效)，f7=竞价涨幅%，f8=撮合价，f11=竞价成交额。
+        """
+        sk = str(sk or "0")
+        limit = max(20, min(500, int(limit or 150)))
         data: dict[str, Any] = {}
         for base in (
             "https://push2dycalc.eastmoney.com/api/qt/jjyd/get",
@@ -1899,13 +1944,13 @@ class EastMoneyClient:
                     {
                         "fltt": "2",
                         "fields": "f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11",
-                        "sk": "1",
+                        "sk": sk,
                         "mt": "109",
                         "new": "1",
                         "fid": "f7",
                         "po": "1",
                         "pi": "0",
-                        "pz": "100",
+                        "pz": str(limit),
                         "ut": UT_QUOTE,
                     },
                     referer="https://vipmoney.eastmoney.com/collect/watchstock/bidding.html",
@@ -1923,11 +1968,13 @@ class EastMoneyClient:
             if not code.isdigit():
                 continue
             price = float(r.get("f8") or 0)
-            noe = float(r.get("f6") or 0)  # 未匹配额
+            noe = float(r.get("f6") or 0)
             pct = float(r.get("f7") or 0)
-            amount = float(r.get("f11") or 0)  # 竞价撮合额
-            # 未匹配量(手) = 未匹配额 / 价 / 100
-            nol_hands = (noe / price / 100.0) if price > 0 else 0.0
+            amount = float(r.get("f11") or 0)
+            # 非一字榜 f6 常与涨幅同量级，不可当未匹配额；仅 sk=1 信 seal
+            is_yizhi = sk == "1" and noe > 0 and price > 0
+            seal = noe if is_yizhi else 0.0
+            nol_hands = (seal / price / 100.0) if is_yizhi and price > 0 else 0.0
             mkt = int(r.get("f3") or 0)
             out.append(
                 {
@@ -1938,19 +1985,73 @@ class EastMoneyClient:
                     "auction_pct": pct,
                     "change_pct": pct,
                     "amount": amount,
-                    "seal_amount": noe,
+                    "seal_amount": seal,
                     "unmatched_vol": nol_hands,
-                    "is_yizhi": noe > 0 and price > 0,
+                    "is_yizhi": is_yizhi,
                     "board_count": 1,
                     "industry": "",
                     "concepts": [],
                     "market": "沪" if mkt == 1 else "深",
                     "auction_time": str(r.get("f1") or ""),
                     "float_mv": 0.0,
+                    "limit_up": price if is_yizhi and price > 0 else 0.0,
                 }
             )
-        out.sort(key=lambda x: float(x.get("seal_amount") or 0), reverse=True)
-        return out
+        if sk == "1":
+            out.sort(key=lambda x: float(x.get("seal_amount") or 0), reverse=True)
+        else:
+            out.sort(key=lambda x: float(x.get("auction_pct") or 0), reverse=True)
+        return out[:limit]
+
+    async def fetch_em_auction_yizhi(self) -> list[dict[str, Any]]:
+        """东方财富「集合竞价 → 竞价一字板」官方列表（jjyd sk=1）。"""
+        return await self.fetch_em_auction_jjyd(sk="1", limit=100)
+
+    async def fetch_em_auction_pct_rank(self, limit: int = 150) -> list[dict[str, Any]]:
+        """东方财富集合竞价涨幅榜（jjyd sk=0），对齐东财 App 竞价涨幅排序。"""
+        return await self.fetch_em_auction_jjyd(sk="0", limit=limit)
+
+    async def _fetch_auction_rank_codes_sina(
+        self, *, each: int = 80
+    ) -> list[tuple[str, str]]:
+        """新浪涨/跌幅榜候选（东财 clist 不稳定时的兜底）。"""
+        each = max(20, min(120, int(each or 80)))
+        client = await self._ensure_client()
+        found: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for asc in ("0", "1"):  # 涨幅 / 跌幅
+            try:
+                resp = await client.get(
+                    "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData",
+                    params={
+                        "page": "1",
+                        "num": str(each),
+                        "sort": "changepercent",
+                        "asc": asc,
+                        "node": "hs_a",
+                        "symbol": "",
+                        "_s_r_a": "init",
+                    },
+                    headers={
+                        **HEADERS,
+                        "Referer": "https://vip.stock.finance.sina.com.cn/mkt/#hs_a",
+                    },
+                )
+                resp.raise_for_status()
+                arr = resp.json()
+            except Exception:
+                continue
+            if not isinstance(arr, list):
+                continue
+            for it in arr:
+                if not isinstance(it, dict):
+                    continue
+                code = str(it.get("code") or "").zfill(6)
+                if not code.isdigit() or code in seen:
+                    continue
+                seen.add(code)
+                found.append((code, ""))
+        return found
 
     async def fetch_auction_matched_amounts(
         self, codes: list[str], *, concurrency: int = 16
@@ -1997,22 +2098,35 @@ class EastMoneyClient:
         return out
 
     async def fetch_auction_market_pool(
-        self, limit: int = 200, *, use_open: bool = False, fast: bool = False
+        self,
+        limit: int = 350,
+        *,
+        use_open: bool = False,
+        fast: bool = False,
+        seed_codes: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """早盘集合竞价观察池（全 A 候选，禁止涨停池）。
 
         口径（仅竞价 9:15–9:30，与盘中/收盘无关）：
-        - 默认观察池约 200：涨/跌/额榜合并截断，保证含竞价一字与活跃非一字
+        - 默认观察池约 350：涨/跌/额榜合并截断，保证含竞价一字与活跃非一字
         - 价格/涨幅：竞价中=撮合价；盘后 use_open=开盘价（=9:25 撮合结果）
         - amount=竞价已匹配成交额（竞价中=盘口累计额；盘后=分时首根额）
         - seal_amount=竞价未匹配额：触板时记买一额，否则 0
         - is_yizhi：竞价中=触板且有未匹配；盘后一字以东财 jjyd sk=1 为准
+        - seed_codes：强制纳入（昨涨停 / 东财一字等），防止榜单接口丢涨停候选
         fast=True：竞价高频轮询，少翻页以压低单轮耗时。
         """
-        limit = max(80, min(400, int(limit or 200)))
+        limit = max(80, min(400, int(limit or 350)))
         codes: list[str] = []
         seen: set[str] = set()
         industry_map: dict[str, str] = {}
+
+        # 种子代码优先，确保一字/昨板不会被榜单失败漏掉
+        for raw in seed_codes or []:
+            code = str(raw or "").zfill(6)
+            if code.isdigit() and code not in seen:
+                seen.add(code)
+                codes.append(code)
 
         async def _pull(fid: str, po: str, pages: int = 5) -> list[tuple[str, str]]:
             found: list[tuple[str, str]] = []
@@ -2022,6 +2136,8 @@ class EastMoneyClient:
                 for base in (
                     "https://push2.eastmoney.com/api/qt/clist/get",
                     "https://82.push2.eastmoney.com/api/qt/clist/get",
+                    "https://40.push2.eastmoney.com/api/qt/clist/get",
+                    "https://push2delay.eastmoney.com/api/qt/clist/get",
                 ):
                     try:
                         data = await self._get(
@@ -2077,8 +2193,24 @@ class EastMoneyClient:
                 _pull("f6", "1", 3),
                 _pull("f17", "1", 2),
             ]
+        clist_n = 0
         for chunk in await asyncio.gather(*pull_jobs):
             for code, ind in chunk:
+                clist_n += 1
+                if code in seen:
+                    continue
+                seen.add(code)
+                codes.append(code)
+                if ind:
+                    industry_map[code] = ind
+
+        # 东财 clist 偶发断连：用新浪涨跌榜补候选，避免只剩跌停侧
+        if clist_n < 30:
+            try:
+                sina_chunk = await self._fetch_auction_rank_codes_sina(each=100)
+            except Exception:
+                sina_chunk = []
+            for code, ind in sina_chunk:
                 if code in seen:
                     continue
                 seen.add(code)
@@ -2103,6 +2235,9 @@ class EastMoneyClient:
                 live_pct = round((last - prev) / prev * 100, 2)
             float_mv = float(q.get("float_mv") or 0)
             limit_up = float(q.get("limit_up") or 0)
+            if limit_up <= 0 and prev > 0:
+                limit_up = infer_limit_up(code, name, prev)
+            buy1 = float(q.get("buy1") or 0)
 
             if use_open:
                 price = open_p
@@ -2125,21 +2260,26 @@ class EastMoneyClient:
                 )
                 if abs(pct) > 21:
                     continue
-                at_limit = (
-                    limit_up > 0 and price > 0 and abs(price - limit_up) <= 0.005
+                # 触板：现价或买一贴近涨停价（竞价中买一即未匹配买盘）
+                at_limit = limit_up > 0 and price > 0 and abs(price - limit_up) <= 0.015
+                buy_at_limit = (
+                    limit_up > 0 and buy1 > 0 and abs(buy1 - limit_up) <= 0.015
                 )
-                # 触板才记未匹配额（买一额）；未触板为 0
-                seal = float(q.get("seal_amount") or 0) if at_limit else 0.0
+                seal = float(q.get("seal_amount") or 0) if (at_limit or buy_at_limit) else 0.0
                 # 竞价中盘口成交额即竞价累计撮合额
                 auction_amount = float(q.get("amount") or 0)
 
-            # 竞价一字 = 涨停价 + 未匹配额>0（盘后 seal=0 → 非一字，由服务层用 9:25 落库未匹配重算）
-            at_limit = (
-                limit_up > 0 and price > 0 and abs(price - limit_up) <= 0.005
+            # 竞价一字 = 涨停价撮合 + 未匹配额>0
+            at_limit = limit_up > 0 and price > 0 and abs(price - limit_up) <= 0.015
+            buy_at_limit = (
+                limit_up > 0 and buy1 > 0 and abs(buy1 - limit_up) <= 0.015
             )
-            if not at_limit:
+            if not (at_limit or buy_at_limit):
                 seal = 0.0
-            is_yizhi = bool(at_limit and float(seal or 0) > 0)
+            # 一字：价在涨停且有封单；买一也在涨停时即使现价字段抖动仍算
+            is_yizhi = bool(
+                float(seal or 0) > 0 and (at_limit or (buy_at_limit and pct >= 9.0))
+            )
             industry = industry_map.get(code) or ""
             out.append(
                 {
@@ -2210,12 +2350,16 @@ class EastMoneyClient:
         return out
 
     async def fetch_speed_rank(self, limit: int = 50) -> list[dict[str, Any]]:
-        """A-share intraday speed ranking (东财涨速榜, fid=f22)."""
+        """A-share intraday speed ranking (东财涨速榜, fid=f22)。
+
+        clist 多节点重试；仍空时用涨幅榜+腾讯盘口估算涨速兜底，避免前端长时间空白。
+        """
         limit = max(1, min(100, int(limit or 50)))
         data: dict[str, Any] = {}
         for base in (
             "https://push2.eastmoney.com/api/qt/clist/get",
             "https://82.push2.eastmoney.com/api/qt/clist/get",
+            "https://40.push2.eastmoney.com/api/qt/clist/get",
             "https://push2delay.eastmoney.com/api/qt/clist/get",
         ):
             try:
@@ -2281,7 +2425,55 @@ class EastMoneyClient:
             )
             if len(out) >= limit:
                 break
-        return out
+        if out:
+            return out
+        # 东财涨速榜失败：涨幅榜候选 + 腾讯行情，speed 暂用涨跌幅占位，保证有数据可看
+        return await self._fetch_speed_rank_fallback(limit)
+
+    async def _fetch_speed_rank_fallback(self, limit: int) -> list[dict[str, Any]]:
+        """clist f22 失败时的兜底：新浪涨幅榜 + 腾讯盘口。"""
+        try:
+            seeds = await self._fetch_auction_rank_codes_sina(each=max(limit, 80))
+        except Exception:
+            seeds = []
+        codes = [c for c, _ in seeds][: max(limit * 2, 80)]
+        if not codes:
+            return []
+        try:
+            quotes = await self.fetch_quotes_tencent_batch(codes)
+        except Exception:
+            quotes = {}
+        out: list[dict[str, Any]] = []
+        for code in codes:
+            q = quotes.get(code)
+            if not q:
+                continue
+            name = str(q.get("name") or code)
+            if name.startswith(("N", "C", "n", "c")):
+                continue
+            pct = float(q.get("change_pct") or 0)
+            out.append(
+                {
+                    "code": code,
+                    "name": name,
+                    "market": str(q.get("market") or _market_prefix(code)),
+                    "price": float(q.get("price") or 0),
+                    "change_pct": pct,
+                    # 无分钟涨速时用涨跌幅近似，避免整榜空白
+                    "speed": pct,
+                    "amount": float(q.get("amount") or 0),
+                    "volume": float(q.get("volume") or 0),
+                    "turnover": 0.0,
+                    "total_mv": float(q.get("total_mv") or 0),
+                    "float_mv": float(q.get("float_mv") or 0),
+                    "industry": "",
+                    "concepts": [],
+                    "board_count": 1,
+                    "open_times": 0,
+                }
+            )
+        out.sort(key=lambda x: float(x.get("speed") or 0), reverse=True)
+        return out[:limit]
 
     async def fetch_quotes_rich_batch(self, codes: list[str]) -> dict[str, dict[str, Any]]:
         """Batch quotes with amount/volume/mv for watchlist."""

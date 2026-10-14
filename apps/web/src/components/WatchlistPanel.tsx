@@ -1,50 +1,25 @@
 import { AutoComplete, Button, Input, Space, message } from "antd";
 import { DeleteOutlined, PushpinFilled, PushpinOutlined } from "@ant-design/icons";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  startTransition,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
+import {
+  mergeRows,
+  quoteListSignature,
+  stabilizeList,
+} from "../lib/stockRows";
 import { loadWatchlist, saveWatchlist } from "../lib/watchlist";
 import type { StockItem } from "../types";
 import { MonitorTable } from "./MonitorTable";
 import { StockChartModal } from "./StockChartModal";
 
 type Suggest = { code: string; name: string; market: string };
-
-function rowEqual(a: StockItem, b: StockItem): boolean {
-  return (
-    a.code === b.code &&
-    a.name === b.name &&
-    a.price === b.price &&
-    a.change_pct === b.change_pct &&
-    a.amount === b.amount &&
-    a.volume === b.volume &&
-    a.seal_amount === b.seal_amount &&
-    a.float_mv === b.float_mv &&
-    a.total_mv === b.total_mv &&
-    a.turnover === b.turnover &&
-    a.first_seal_time === b.first_seal_time &&
-    a.last_seal_time === b.last_seal_time &&
-    a.break_time === b.break_time &&
-    a.board_count === b.board_count &&
-    a.open_times === b.open_times &&
-    a.board_tag === b.board_tag &&
-    a.status === b.status &&
-    a.industry === b.industry &&
-    a.region === b.region &&
-    a.speed === b.speed &&
-    a.reason === b.reason &&
-    a.risk_hint === b.risk_hint &&
-    (a.concepts || []).join("|") === (b.concepts || []).join("|") &&
-    (a.risk_tags || []).join("|") === (b.risk_tags || []).join("|")
-  );
-}
-
-function mergeRows(prev: StockItem[], next: StockItem[]): StockItem[] {
-  const prevMap = new Map(prev.map((r) => [r.code, r]));
-  return next.map((row) => {
-    const old = prevMap.get(row.code);
-    if (old && rowEqual(old, row)) return old;
-    return row;
-  });
-}
 
 export function WatchlistPanel({
   columns,
@@ -63,11 +38,22 @@ export function WatchlistPanel({
   const [rows, setRows] = useState<StockItem[]>([]);
   const [filterKw, setFilterKw] = useState("");
   const [addKw, setAddKw] = useState("");
-  const [options, setOptions] = useState<{ value: string; label: string; item: Suggest }[]>([]);
+  const [options, setOptions] = useState<
+    { value: string; label: string; item: Suggest }[]
+  >([]);
   const [chartStock, setChartStock] = useState<StockItem | null>(null);
   const timer = useRef<number | null>(null);
   const searchTimer = useRef<number | null>(null);
+  const seq = useRef(0);
+  const sigRef = useRef("");
+  const abortRef = useRef<AbortController | null>(null);
+  const codesRef = useRef<string[]>([]);
+  const filteredRef = useRef<StockItem[]>([]);
   const pinSet = useMemo(() => new Set(pinned), [pinned]);
+
+  useEffect(() => {
+    codesRef.current = codes;
+  }, [codes]);
 
   useEffect(() => {
     let cancelled = false;
@@ -94,30 +80,48 @@ export function WatchlistPanel({
     }
   }, []);
 
-  const refresh = useCallback(async (list: string[]) => {
-    if (!list.length) {
-      setRows([]);
+  const refresh = useCallback(async (list?: string[]) => {
+    const codesNow = list ?? codesRef.current;
+    if (!codesNow.length) {
+      sigRef.current = "";
+      startTransition(() => setRows([]));
       return;
     }
+    const my = ++seq.current;
+    abortRef.current?.abort();
+    const ac = new AbortController();
+    abortRef.current = ac;
     try {
-      const res = await fetch(`/api/stocks/batch?codes=${list.join(",")}`);
-      if (!res.ok) return;
+      const res = await fetch(`/api/stocks/batch?codes=${codesNow.join(",")}`, {
+        signal: ac.signal,
+      });
+      if (!res.ok || my !== seq.current) return;
       const data = (await res.json()) as { items: StockItem[] };
       const items = data.items || [];
-      setRows((prev) => mergeRows(prev, items));
-    } catch {
+      const sig = quoteListSignature(items);
+      if (sig === sigRef.current) return;
+      sigRef.current = sig;
+      startTransition(() => {
+        setRows((prev) => mergeRows(prev, items, { keepOnEmpty: true }));
+      });
+    } catch (e) {
+      if ((e as { name?: string })?.name === "AbortError") return;
       /* keep previous */
     }
   }, []);
 
   useEffect(() => {
     if (!ready) return;
+    seq.current += 1;
+    sigRef.current = "";
     void refresh(codes);
     if (timer.current) window.clearInterval(timer.current);
-    const ms = Math.max(1000, Math.round((pollSec || 2.5) * 1000));
-    timer.current = window.setInterval(() => void refresh(codes), ms);
+    const ms = Math.max(500, Math.round((pollSec || 2.5) * 1000));
+    timer.current = window.setInterval(() => void refresh(), ms);
     return () => {
       if (timer.current) window.clearInterval(timer.current);
+      abortRef.current?.abort();
+      seq.current += 1;
     };
   }, [codes, pollSec, ready, refresh]);
 
@@ -131,7 +135,9 @@ export function WatchlistPanel({
     }
     searchTimer.current = window.setTimeout(async () => {
       try {
-        const res = await fetch(`/api/stocks/search?q=${encodeURIComponent(q)}&limit=12`);
+        const res = await fetch(
+          `/api/stocks/search?q=${encodeURIComponent(q)}&limit=12`,
+        );
         if (!res.ok) return;
         const data = (await res.json()) as { items: Suggest[] };
         setOptions(
@@ -193,14 +199,16 @@ export function WatchlistPanel({
           (s.industry || "").toLowerCase().includes(kw),
       );
     }
-    // 置顶优先（与 codes 序一致）
     const order = new Map(codes.map((c, i) => [c, i]));
-    return [...list].sort((a, b) => {
+    const sorted = [...list].sort((a, b) => {
       const ap = pinSet.has(a.code) ? 0 : 1;
       const bp = pinSet.has(b.code) ? 0 : 1;
       if (ap !== bp) return ap - bp;
       return (order.get(a.code) ?? 999) - (order.get(b.code) ?? 999);
     });
+    const stable = stabilizeList(filteredRef.current, sorted);
+    filteredRef.current = stable;
+    return stable;
   }, [rows, filterKw, codes, pinSet]);
 
   const onOpenChart = useCallback((s: StockItem) => {
@@ -234,6 +242,17 @@ export function WatchlistPanel({
       </span>
     ),
     [pinSet, togglePin, removeStock],
+  );
+
+  const rowClassName = useCallback(
+    (r: StockItem) =>
+      [
+        r.code === selectedCode ? "monitor-row-selected" : "",
+        pinSet.has(r.code) ? "monitor-row-pinned" : "",
+      ]
+        .filter(Boolean)
+        .join(" "),
+    [selectedCode, pinSet],
   );
 
   return (
@@ -271,14 +290,8 @@ export function WatchlistPanel({
         selectedCode={selectedCode}
         onOpenChart={onOpenChart}
         extraActions={extraActions}
-        rowClassName={(r) =>
-          [
-            r.code === selectedCode ? "monitor-row-selected" : "",
-            pinSet.has(r.code) ? "monitor-row-pinned" : "",
-          ]
-            .filter(Boolean)
-            .join(" ")
-        }
+        rowClassName={rowClassName}
+        preserveScroll
       />
 
       <StockChartModal

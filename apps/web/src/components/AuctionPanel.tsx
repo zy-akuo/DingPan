@@ -1,5 +1,5 @@
 import { SearchOutlined } from "@ant-design/icons";
-import { Empty, Input, Segmented, Select, Space, Spin, Tabs, Tag } from "antd";
+import { Empty, Input, Select, Space, Spin, Tabs, Tag } from "antd";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AuctionVirtualList } from "./AuctionVirtualList";
 import { collectRegions } from "./MonitorFilterBar";
@@ -37,8 +37,6 @@ type AuctionStock = {
   pct_0925?: number | null;
 };
 
-type DateOption = { date: string; date_label: string };
-
 type BoardColumn = {
   date: string;
   date_label: string;
@@ -52,11 +50,13 @@ type BoardColumn = {
 
 type BoardPayload = {
   phase?: string;
+  display_mode?: string;
+  display_date?: string;
+  is_live_today?: boolean;
   active_slot?: string | null;
   trade_date?: string;
   selected_date?: string;
   updated_at?: string;
-  dates?: DateOption[];
   column?: BoardColumn;
 };
 
@@ -85,6 +85,7 @@ type PrevGroup = {
 
 type PrevPayload = {
   phase?: string;
+  trade_date?: string;
   prev_date?: string;
   updated_at?: string;
   groups?: PrevGroup[];
@@ -133,11 +134,39 @@ function contentSignature(data: unknown): string {
   return JSON.stringify(rest);
 }
 
+/** 9:10 起加强轮询（预热清空 + 竞价），对齐服务端 display_mode */
 function isLocalAuctionWindow(now = new Date()): boolean {
   const day = now.getDay();
   if (day === 0 || day === 6) return false;
   const mins = now.getHours() * 60 + now.getMinutes();
-  return mins >= 9 * 60 + 14 && mins < 9 * 60 + 30;
+  return mins >= 9 * 60 + 10 && mins < 9 * 60 + 30;
+}
+
+function boardStatusTag(data: BoardPayload | null | undefined) {
+  const mode = data?.display_mode || "";
+  const slot = data?.active_slot || "";
+  if (mode === "auction" || data?.phase === "auction") {
+    return (
+      <Space size={4}>
+        <Tag color="red">竞价中 {slot}</Tag>
+        {slot === "0915" ? (
+          <Tag color="orange">可撤单，封单仅供参考</Tag>
+        ) : null}
+      </Space>
+    );
+  }
+  if (mode === "warming") {
+    return <Tag color="gold">已清空，等待竞价</Tag>;
+  }
+  if (mode === "display_prev") {
+    const ds = data?.display_date || data?.selected_date || "";
+    const label =
+      ds.length === 8
+        ? `${ds.slice(0, 4)}-${ds.slice(4, 6)}-${ds.slice(6, 8)}`
+        : ds;
+    return <Tag>展示上一交易日{label ? ` ${label}` : ""}</Tag>;
+  }
+  return <Tag>非竞价时段</Tag>;
 }
 
 function toStockItem(s: {
@@ -188,7 +217,7 @@ function toStockItem(s: {
   };
 }
 
-function useStablePoll<T extends { phase?: string }>(
+function useStablePoll<T extends { phase?: string; display_mode?: string }>(
   fetcher: () => Promise<T>,
   intervalSec: number,
   enabled: boolean,
@@ -207,7 +236,11 @@ function useStablePoll<T extends { phase?: string }>(
   const fetcherRef = useRef(fetcher);
   fetcherRef.current = fetcher;
 
-  const shouldPoll = data?.phase === "auction" || inAuctionWindow;
+  const shouldPoll =
+    data?.phase === "auction" ||
+    data?.display_mode === "warming" ||
+    data?.display_mode === "auction" ||
+    inAuctionWindow;
 
   const refresh = useCallback(async () => {
     if (busy.current) return;
@@ -367,35 +400,18 @@ function AuctionBoardTab({
 }) {
   const [kw, setKw] = useState("");
   const [region, setRegion] = useState("");
-  const [selectedDate, setSelectedDate] = useState("");
 
   const fetcher = useCallback(async () => {
-    const q = selectedDate
-      ? `?days=3&date=${encodeURIComponent(selectedDate)}`
-      : "?days=3";
-    const res = await fetch(`/api/auction/board${q}`);
+    const res = await fetch("/api/auction/board");
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return (await res.json()) as BoardPayload;
-  }, [selectedDate]);
+  }, []);
 
-  const { data, loading, updatedAt } = useStablePoll(
-    fetcher,
-    pollSec,
-    enabled,
-    selectedDate,
-  );
+  const { data, loading, updatedAt } = useStablePoll(fetcher, pollSec, enabled);
 
-  useEffect(() => {
-    if (!selectedDate && data?.selected_date) {
-      setSelectedDate(data.selected_date);
-    } else if (!selectedDate && data?.trade_date) {
-      setSelectedDate(data.trade_date);
-    }
-  }, [data?.selected_date, data?.trade_date, selectedDate]);
-
-  const dateOptions = data?.dates || [];
   const col = data?.column;
-  const isToday = (data?.selected_date || selectedDate) === data?.trade_date;
+  const isToday = !!data?.is_live_today;
+  const displayMode = data?.display_mode || "";
 
   const yizhi = col?.yizhi_items || [];
   const other = col?.other_items || [];
@@ -421,6 +437,13 @@ function AuctionBoardTab({
   }, [yizhi, other, kw, region]);
 
   const searching = !!(kw.trim() || region.trim());
+
+  const emptyDesc =
+    displayMode === "warming"
+      ? "已清空上一交易日数据，9:15 起自动采集今日竞价"
+      : displayMode === "display_prev"
+        ? "暂无上一交易日竞价快照"
+        : "暂无竞价数据（竞价时段自动采集 9:15/9:20/9:25）";
 
   const renderSection = (title: string, items: AuctionStock[]) => (
     <div className="auction-wide-section" key={title}>
@@ -457,17 +480,6 @@ function AuctionBoardTab({
     <div className="auction-board">
       <div className="auction-toolbar">
         <Space wrap>
-          {dateOptions.length ? (
-            <Segmented
-              size="small"
-              value={selectedDate || dateOptions[0]?.date}
-              onChange={(v) => setSelectedDate(String(v))}
-              options={dateOptions.map((d) => ({
-                label: d.date_label,
-                value: d.date,
-              }))}
-            />
-          ) : null}
           <Input
             allowClear
             prefix={<SearchOutlined />}
@@ -489,7 +501,7 @@ function AuctionBoardTab({
           {searching ? (
             <span className="filter-count">高亮 {hitCodes?.size ?? 0} 只</span>
           ) : null}
-          {col ? (
+          {col && displayMode !== "warming" ? (
             <span className="muted">
               一字 {col.yizhi_count ?? yizhi.length} | 封单{" "}
               {formatMoney(col.seal_total || 0)}
@@ -498,11 +510,7 @@ function AuctionBoardTab({
           {updatedAt ? (
             <span className="muted">更新 {updatedAt.slice(11, 19)}</span>
           ) : null}
-          {data?.phase === "auction" ? (
-            <Tag color="red">竞价中 {data.active_slot || ""}</Tag>
-          ) : (
-            <Tag>非竞价时段</Tag>
-          )}
+          {boardStatusTag(data)}
         </Space>
       </div>
 
@@ -511,7 +519,7 @@ function AuctionBoardTab({
           <Spin size="small" /> 加载竞价数据…
         </div>
       ) : !yizhi.length && !other.length ? (
-        <Empty description="暂无竞价数据（竞价时段自动采集 9:15/9:20/9:25）" />
+        <Empty description={emptyDesc} />
       ) : (
         <div className="auction-wide">
           <AuctionTableHeader />
@@ -566,11 +574,12 @@ function AuctionPrevTab({
   }, [groups, kw, region]);
 
   const searching = !!(kw.trim() || region.trim());
-  const dateLabel = data?.prev_date
-    ? data.prev_date.length === 8
-      ? `${data.prev_date.slice(0, 4)}-${data.prev_date.slice(4, 6)}-${data.prev_date.slice(6, 8)}`
-      : data.prev_date
-    : "—";
+  const fmtDate = (ds?: string) =>
+    ds && ds.length === 8
+      ? `${ds.slice(0, 4)}-${ds.slice(4, 6)}-${ds.slice(6, 8)}`
+      : ds || "—";
+  const prevLabel = fmtDate(data?.prev_date);
+  const todayLabel = fmtDate(data?.trade_date);
 
   return (
     <div className="auction-prev ladder">
@@ -617,7 +626,9 @@ function AuctionPrevTab({
         <Empty description="暂无昨日涨停数据" />
       ) : (
         <>
-          <h2 className="ladder-title">【{dateLabel}】昨日涨停 · 今日竞价</h2>
+          <h2 className="ladder-title">
+            【{prevLabel}】昨日涨停 · 【{todayLabel}】今日竞价
+          </h2>
           <div className="ladder-table">
             <div className="ladder-head">
               <div>连板</div>

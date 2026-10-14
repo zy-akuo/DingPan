@@ -128,8 +128,8 @@ async def market_speed(limit: int = 50):
 
 
 @app.get("/api/auction/board")
-async def auction_board(days: int = 3, date: str = ""):
-    """单日宽表集合竞价（可切近 N 日）。"""
+async def auction_board(days: int = 1, date: str = ""):
+    """当日竞价宽表（9:10 前展示昨交易日；多日参数已忽略）。"""
     try:
         return await market_service.get_auction_board(days=days, date=date or None)
     except Exception as e:
