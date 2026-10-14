@@ -1,5 +1,5 @@
-import { SearchOutlined } from "@ant-design/icons";
-import { Empty, Input, Select, Space, Spin, Tabs, Tag } from "antd";
+import { ReloadOutlined, SearchOutlined } from "@ant-design/icons";
+import { Button, Empty, Input, Select, Space, Spin, Tabs, Tag, message } from "antd";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AuctionVirtualList } from "./AuctionVirtualList";
 import { collectRegions } from "./MonitorFilterBar";
@@ -58,6 +58,7 @@ type BoardPayload = {
   selected_date?: string;
   updated_at?: string;
   column?: BoardColumn;
+  error?: string;
 };
 
 type PrevStock = {
@@ -222,7 +223,12 @@ function useStablePoll<T extends { phase?: string; display_mode?: string }>(
   intervalSec: number,
   enabled: boolean,
   depsKey = "",
-): { data: T | null; loading: boolean; updatedAt: string } {
+): {
+  data: T | null;
+  loading: boolean;
+  updatedAt: string;
+  applyPayload: (next: T) => void;
+} {
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(true);
   const [updatedAt, setUpdatedAt] = useState("");
@@ -241,6 +247,17 @@ function useStablePoll<T extends { phase?: string; display_mode?: string }>(
     data?.display_mode === "warming" ||
     data?.display_mode === "auction" ||
     inAuctionWindow;
+
+  const applyPayload = useCallback((next: T) => {
+    frozen.current = contentSignature(next);
+    setData(next);
+    const ts =
+      next && typeof next === "object" && "updated_at" in (next as object)
+        ? String((next as { updated_at?: string }).updated_at || "")
+        : "";
+    if (ts) setUpdatedAt(ts);
+    setLoading(false);
+  }, []);
 
   const refresh = useCallback(async () => {
     if (busy.current) return;
@@ -309,7 +326,7 @@ function useStablePoll<T extends { phase?: string; display_mode?: string }>(
     };
   }, [enabled, intervalSec, refresh, shouldPoll, depsKey]);
 
-  return { data, loading, updatedAt };
+  return { data, loading, updatedAt, applyPayload };
 }
 
 function AuctionTableHeader() {
@@ -401,13 +418,36 @@ function AuctionBoardTab({
   const [kw, setKw] = useState("");
   const [region, setRegion] = useState("");
 
+  const [refreshing, setRefreshing] = useState(false);
+
   const fetcher = useCallback(async () => {
     const res = await fetch("/api/auction/board");
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return (await res.json()) as BoardPayload;
   }, []);
 
-  const { data, loading, updatedAt } = useStablePoll(fetcher, pollSec, enabled);
+  const { data, loading, updatedAt, applyPayload } = useStablePoll(
+    fetcher,
+    pollSec,
+    enabled,
+  );
+
+  const onManualRefresh = useCallback(async () => {
+    if (refreshing) return;
+    setRefreshing(true);
+    try {
+      const res = await fetch("/api/auction/refresh", { method: "POST" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const next = (await res.json()) as BoardPayload;
+      if (next.error) throw new Error(String(next.error));
+      applyPayload(next);
+      message.success("已强制刷新竞价数据");
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : "刷新失败");
+    } finally {
+      setRefreshing(false);
+    }
+  }, [applyPayload, refreshing]);
 
   const col = data?.column;
   const isToday = !!data?.is_live_today;
@@ -510,6 +550,15 @@ function AuctionBoardTab({
           {updatedAt ? (
             <span className="muted">更新 {updatedAt.slice(11, 19)}</span>
           ) : null}
+          <Button
+            size="small"
+            icon={<ReloadOutlined spin={refreshing} />}
+            loading={refreshing}
+            onClick={() => void onManualRefresh()}
+            title="强制重采最新竞价（竞价中会覆盖当前时段快照）"
+          >
+            刷新
+          </Button>
           {boardStatusTag(data)}
         </Space>
       </div>

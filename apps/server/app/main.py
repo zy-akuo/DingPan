@@ -142,6 +142,21 @@ async def auction_board(days: int = 1, date: str = ""):
         }
 
 
+@app.post("/api/auction/refresh")
+async def auction_refresh():
+    """手动强制刷新竞价宽表（竞价中重采并覆盖当前时段快照）。"""
+    try:
+        return await market_service.force_refresh_auction_board()
+    except Exception as e:
+        return {
+            "phase": "idle",
+            "dates": [],
+            "column": {"yizhi_items": [], "other_items": [], "items": []},
+            "error": str(e),
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+
+
 @app.get("/api/auction/prev-ladder")
 async def auction_prev_ladder():
     """昨日涨停股今日竞价涨幅（按连板分组）。"""

@@ -4,11 +4,21 @@ import {
   RightOutlined,
   SearchOutlined,
 } from "@ant-design/icons";
-import { Button, DatePicker, Empty, Input, Segmented, Spin, Tag } from "antd";
+import {
+  AutoComplete,
+  Button,
+  DatePicker,
+  Empty,
+  Input,
+  Segmented,
+  Spin,
+  Tag,
+} from "antd";
 import dayjs, { type Dayjs } from "dayjs";
 import customParseFormat from "dayjs/plugin/customParseFormat";
 import "dayjs/locale/zh-cn";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { matchNameOrInitials } from "../lib/stockMatch";
 import type {
   HistoryGroup,
   HistorySnapshot,
@@ -19,6 +29,8 @@ import type {
 import { formatMoney, formatPct, tradeDateLabel } from "../types";
 import { MonitorTable } from "./MonitorTable";
 import { StockChartModal } from "./StockChartModal";
+
+type StockSuggest = { code: string; name: string; market: string };
 
 dayjs.extend(customParseFormat);
 dayjs.locale("zh-cn");
@@ -181,8 +193,12 @@ export function HistoryBackPanel({
   onDateChange: (ymd: string) => void;
 }) {
   const [mode, setMode] = useState<ViewMode>("ladder");
+  const [nameKw, setNameKw] = useState("");
   const [kw, setKw] = useState("");
   const [stockKw, setStockKw] = useState("");
+  const [stockOptions, setStockOptions] = useState<
+    { value: string; label: string; item: StockSuggest }[]
+  >([]);
   const [stockLoading, setStockLoading] = useState(false);
   const [stockResult, setStockResult] = useState<StockZtHistoryResult | null>(null);
   const [highlightCode, setHighlightCode] = useState<string | null>(null);
@@ -192,6 +208,7 @@ export function HistoryBackPanel({
   const [activeConcept, setActiveConcept] = useState<string | null>(null);
   const reqSeq = useRef(0);
   const stockReqSeq = useRef(0);
+  const stockSearchTimer = useRef<number | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const hitChipRef = useRef<HTMLDivElement | null>(null);
 
@@ -265,13 +282,12 @@ export function HistoryBackPanel({
     return () => window.clearTimeout(t);
   }, [highlightCode, loading, date, data]);
 
-  const filterStock = useCallback(
+  /** 涨停原因筛选（不吞名称模糊，名称走连板天梯同款高亮） */
+  const filterByReason = useCallback(
     (s: StockItem) => {
       const q = kw.trim().toLowerCase();
       if (!q) return true;
       return (
-        s.code.includes(q) ||
-        (s.name || "").toLowerCase().includes(q) ||
         (s.reason || "").toLowerCase().includes(q) ||
         (s.industry || "").toLowerCase().includes(q) ||
         (s.concepts || []).some((c) => c.toLowerCase().includes(q))
@@ -280,23 +296,41 @@ export function HistoryBackPanel({
     [kw],
   );
 
+  const nameSearching = !!nameKw.trim();
+  const nameHitCodes = useMemo(() => {
+    const q = nameKw.trim();
+    if (!q) return null as Set<string> | null;
+    const set = new Set<string>();
+    const push = (stocks: StockItem[]) => {
+      for (const s of stocks) {
+        if (matchNameOrInitials(s.name || "", q)) set.add(s.code);
+      }
+    };
+    for (const g of data?.board_groups || []) push(g.stocks || []);
+    for (const g of data?.concept_groups || []) push(g.stocks || []);
+    for (const s of data?.items || []) {
+      if (matchNameOrInitials(s.name || "", q)) set.add(s.code);
+    }
+    return set;
+  }, [data, nameKw]);
+
   const conceptGroups = useMemo(() => {
     const raw = data?.concept_groups || [];
     if (!kw.trim()) return raw;
     return raw
       .map((g) => {
-        const stocks = (g.stocks || []).filter(filterStock);
+        const stocks = (g.stocks || []).filter(filterByReason);
         if (!stocks.length) return null;
         return { ...g, stocks, count: stocks.length };
       })
       .filter(Boolean) as HistoryGroup[];
-  }, [data, kw, filterStock]);
+  }, [data, kw, filterByReason]);
 
   const boardGroups = useMemo(() => {
     const raw = data?.board_groups || [];
     return raw
       .map((g) => {
-        let stocks = (g.stocks || []).filter(filterStock);
+        let stocks = (g.stocks || []).filter(filterByReason);
         if (activeConcept) {
           stocks = stocks.filter((s) => {
             const primary = (s.reason || s.industry || "").trim();
@@ -308,12 +342,13 @@ export function HistoryBackPanel({
         return { ...g, stocks, count: stocks.length };
       })
       .filter(Boolean) as HistoryGroup[];
-  }, [data, kw, filterStock, activeConcept]);
+  }, [data, kw, filterByReason, activeConcept]);
 
   const dateLabel = tradeDateLabel(date);
   const canNext = dateValue.isBefore(dayjs(), "day");
   const ztCount = data?.zt_count ?? data?.count ?? 0;
   const highlighting = !!highlightCode;
+  const ladderSearching = highlighting || nameSearching;
 
   const detailGroup = useMemo(() => {
     if (mode !== "concept") return null;
@@ -381,13 +416,50 @@ export function HistoryBackPanel({
 
   const clearStockSearch = useCallback(() => {
     setStockKw("");
+    setStockOptions([]);
     setStockResult(null);
     setHighlightCode(null);
   }, []);
 
+  const onStockSuggest = useCallback((text: string) => {
+    setStockKw(text);
+    if (stockSearchTimer.current) window.clearTimeout(stockSearchTimer.current);
+    const q = text.trim();
+    if (!q) {
+      setStockOptions([]);
+      return;
+    }
+    stockSearchTimer.current = window.setTimeout(async () => {
+      try {
+        const res = await fetch(
+          `/api/stocks/search?q=${encodeURIComponent(q)}&limit=12`,
+        );
+        if (!res.ok) return;
+        const payload = (await res.json()) as { items: StockSuggest[] };
+        setStockOptions(
+          (payload.items || []).map((it) => ({
+            value: `${it.code} ${it.name}`,
+            label: `${it.market || ""} ${it.code} ${it.name}`.trim(),
+            item: it,
+          })),
+        );
+      } catch {
+        setStockOptions([]);
+      }
+    }, 220);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (stockSearchTimer.current) window.clearTimeout(stockSearchTimer.current);
+    };
+  }, []);
+
   const renderStockChip = (gKey: string, s: StockItem) => {
-    const hit = highlighting && s.code === highlightCode;
-    const dim = highlighting && !hit;
+    const jumpHit = highlighting && s.code === highlightCode;
+    const nameHit = nameSearching && !!nameHitCodes?.has(s.code);
+    const hit = jumpHit || nameHit;
+    const dim = ladderSearching && !hit;
     return (
       <StockChip
         key={`${gKey}-${s.code}`}
@@ -396,7 +468,7 @@ export function HistoryBackPanel({
         onOpenChart={setChartStock}
         hit={hit}
         dim={dim}
-        chipRef={hit ? (el) => { hitChipRef.current = el; } : undefined}
+        chipRef={jumpHit ? (el) => { hitChipRef.current = el; } : undefined}
       />
     );
   };
@@ -453,19 +525,64 @@ export function HistoryBackPanel({
             style={{ width: 200 }}
             allowClear
             prefix={<SearchOutlined />}
-            placeholder="个股名称/曾用名"
-            value={stockKw}
-            onChange={(e) => {
-              const v = e.target.value;
-              setStockKw(v);
-              if (!v.trim()) clearStockSearch();
-            }}
-            onPressEnter={() => void runStockSearch(stockKw)}
+            placeholder="名称 / 首字母，如 中 或 zg"
+            value={nameKw}
+            onChange={(e) => setNameKw(e.target.value)}
+            title="当日连板模糊高亮，规则同实时监控连板天梯"
           />
+          {nameSearching ? (
+            <span className="filter-count">高亮 {nameHitCodes?.size ?? 0} 只</span>
+          ) : null}
+          <AutoComplete
+            style={{ width: 220 }}
+            options={stockOptions}
+            value={stockKw}
+            onSearch={onStockSuggest}
+            onSelect={(_, opt) => {
+              const item = (
+                opt as { item?: StockSuggest } | undefined
+              )?.item;
+              if (!item) return;
+              setStockKw(item.name);
+              setStockOptions([]);
+              void runStockSearch(item.name, item.code);
+            }}
+            onClear={() => clearStockSearch()}
+            placeholder="代码/名称查涨停"
+            allowClear
+          >
+            <Input
+              prefix={<SearchOutlined />}
+              onPressEnter={() => {
+                const q = stockKw.trim();
+                if (!q) return;
+                const exact = stockOptions.find(
+                  (o) =>
+                    o.item.code === q ||
+                    o.item.name === q ||
+                    o.value === q,
+                );
+                void runStockSearch(
+                  exact?.item.name || q,
+                  exact?.item.code,
+                );
+              }}
+            />
+          </AutoComplete>
           <Button
             type="primary"
             loading={stockLoading}
-            onClick={() => void runStockSearch(stockKw)}
+            onClick={() => {
+              const q = stockKw.trim();
+              if (!q) return;
+              const exact = stockOptions.find(
+                (o) =>
+                  o.item.code === q ||
+                  o.item.name === q ||
+                  o.value === q,
+              );
+              void runStockSearch(exact?.item.name || q, exact?.item.code);
+            }}
           >
             查涨停
           </Button>

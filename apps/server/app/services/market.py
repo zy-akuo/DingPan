@@ -2855,8 +2855,11 @@ class MarketService:
         t = dt.time()
         return time(9, 15) <= t < time(9, 30)
 
-    async def refresh_auction(self) -> list[dict[str, Any]]:
-        """竞价时段拉取全市场观察池并落库；返回 enrichment 后的 live 列表。"""
+    async def refresh_auction(self, *, force_slot: bool = False) -> list[dict[str, Any]]:
+        """竞价时段拉取全市场观察池并落库；返回 enrichment 后的 live 列表。
+
+        force_slot=True：手动刷新时允许覆盖当前时段已冻结的 slot 快照。
+        """
         self.__init_auction_state()
         now = datetime.now()
         phase = self._auction_phase(now)
@@ -2971,8 +2974,8 @@ class MarketService:
             slot = self._auction_active_slot(now)
             if slot and rows and self._auction_phase(datetime.now()) == "auction":
                 write_key = f"{ds}:{slot}"
-                # 首次有效写入后冻结该 slot，三列 seal 不再被后续轮询覆盖
-                if write_key not in self._auction_written:
+                # 默认首次有效写入后冻结；手动刷新可强制覆盖当前时段
+                if force_slot or write_key not in self._auction_written:
                     try:
                         await replace_auction_slot(
                             ds, slot, rows, self._auction_live_at
@@ -2982,6 +2985,19 @@ class MarketService:
                     except Exception:
                         pass
             return rows
+
+    async def force_refresh_auction_board(self) -> dict[str, Any]:
+        """手动刷新：清缓存；竞价中强制重采并允许覆盖当前 slot；再返回宽表。"""
+        self.__init_auction_state()
+        self._auction_board_cache = None
+        self._auction_prev_cache = None
+        phase = self._auction_phase()
+        if phase == "auction":
+            try:
+                await self.refresh_auction(force_slot=True)
+            except Exception:
+                pass
+        return await self.get_auction_board(days=1)
 
     async def auction_loop(self) -> None:
         """独立竞价轮询：9:10 预热清空；9:15–9:30 拉观察池；开窗前精确对齐。"""
