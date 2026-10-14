@@ -363,7 +363,7 @@ export function AlertBroadcastPanel({
             pagination={false}
             dataSource={rows}
             columns={stockCols}
-            scroll={{ y: "calc(100vh - 300px)" }}
+            scroll={{ y: "calc(100vh - 300px)", x: 360 }}
             locale={{ emptyText: "请添加要监控的股票" }}
             rowClassName={(r) =>
               [
@@ -388,7 +388,7 @@ export function AlertBroadcastPanel({
             pagination={false}
             dataSource={sortedFeed}
             columns={eventCols}
-            scroll={{ y: "calc(100vh - 300px)" }}
+            scroll={{ y: "calc(100vh - 300px)", x: 760 }}
             locale={{ emptyText: codes.length ? "等待异动…" : "添加股票后开始监控" }}
           />
         </div>

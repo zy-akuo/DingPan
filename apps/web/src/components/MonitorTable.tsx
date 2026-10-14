@@ -231,6 +231,13 @@ export function MonitorTable({
     () => buildColumns(columns, onOpenChart, extraActions),
     [columns, onOpenChart, extraActions],
   );
+  const scrollX = useMemo(() => {
+    const sum = cols.reduce((acc, c) => {
+      const w = typeof c.width === "number" ? c.width : 120;
+      return acc + w;
+    }, 0);
+    return Math.max(sum + 24, 1000);
+  }, [cols]);
   const wrapRef = useRef<HTMLDivElement>(null);
   const scrollTopRef = useRef(0);
 
@@ -288,7 +295,7 @@ export function MonitorTable({
         size="small"
         rowKey="code"
         pagination={false}
-        scroll={{ y: scrollY, x: 1000 }}
+        scroll={{ y: scrollY, x: scrollX }}
         dataSource={data}
         columns={cols}
         rowClassName={(r) =>
