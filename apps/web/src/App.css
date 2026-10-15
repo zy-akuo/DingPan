@@ -1901,13 +1901,13 @@ body {
     minmax(140px, 1.3fr)
     70px 70px 70px
     72px
-    88px 72px 88px 96px 64px
+    88px 88px 96px 64px
     56px
     minmax(90px, 1.1fr);
   gap: 6px;
   align-items: center;
   padding: 0 10px;
-  min-width: 1080px;
+  min-width: 1000px;
   box-sizing: border-box;
   font-variant-numeric: tabular-nums;
 }

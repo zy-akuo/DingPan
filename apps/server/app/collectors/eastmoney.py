@@ -1550,7 +1550,8 @@ class EastMoneyClient:
         pct = data.get("total_pct")
         return float(pct) if pct is not None else None
 
-    async def fetch_free_float_shares(self, code: str) -> float | None:
+    async def fetch_equity_structure(self, code: str) -> dict[str, Any] | None:
+        """Latest share structure: free-float / unlimited / total shares."""
         try:
             data = await self._get(
                 "https://datacenter-web.eastmoney.com/api/data/v1/get",
@@ -1571,10 +1572,106 @@ class EastMoneyClient:
             if not rows:
                 return None
             row = rows[0]
-            shares = row.get("FREELIQCI_SHARES") or row.get("UNLIMITED_SHARES")
-            return float(shares) if shares is not None else None
+
+            def _num(key: str) -> float | None:
+                v = row.get(key)
+                if v is None or v == "":
+                    return None
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    return None
+
+            return {
+                "end_date": str(row.get("END_DATE") or "")[:10],
+                "freeliqci_shares": _num("FREELIQCI_SHARES"),
+                "unlimited_shares": _num("UNLIMITED_SHARES"),
+                "total_shares": _num("TOTAL_SHARES"),
+            }
         except Exception:
             return None
+
+    async def fetch_free_float_shares(self, code: str) -> float | None:
+        """Backward-compatible: free-float shares only (may be stale without holders)."""
+        eq = await self.fetch_equity_structure(code)
+        if not eq:
+            return None
+        return eq.get("freeliqci_shares") or eq.get("unlimited_shares")
+
+    @staticmethod
+    def _major_holder_stats(holders: list[dict[str, Any]]) -> tuple[float, float]:
+        """Sum ratio/shares for holders with >=5% (official free-float exclusion)."""
+        maj_pct = 0.0
+        maj_shares = 0.0
+        for h in holders or []:
+            try:
+                ratio = float(h.get("ratio") or 0)
+            except (TypeError, ValueError):
+                continue
+            if ratio < 5.0:
+                continue
+            maj_pct += ratio
+            try:
+                sh = h.get("shares")
+                if sh is not None and sh != "":
+                    maj_shares += float(sh)
+            except (TypeError, ValueError):
+                pass
+        return maj_pct, maj_shares
+
+    @staticmethod
+    def resolve_free_float_shares(
+        *,
+        freeliqci: float | None,
+        unlimited: float | None,
+        total: float | None,
+        float_mv: float | None,
+        price: float | None,
+        major_pct: float,
+        major_shares: float,
+    ) -> float | None:
+        """Resolve free-float shares.
+
+        Official-ish A-share rule:
+          free = circulating(unlimited) - >=5% holders' unrestricted shares.
+        East Money FREELIQCI is preferred when it is not obviously stale/inflated
+        (e.g. equals total shares on a fully-circulated name with large holders).
+        """
+        float_shares: float | None = None
+        if float_mv and price and price > 0:
+            float_shares = float(float_mv) / float(price)
+        circ = unlimited or float_shares
+        if circ is not None and circ <= 0:
+            circ = None
+
+        calc: float | None = None
+        if circ is not None:
+            if major_shares > 0:
+                limited = 0.0
+                if total and total > circ:
+                    limited = float(total) - float(circ)
+                major_in_float = max(0.0, float(major_shares) - limited)
+                major_in_float = min(major_in_float, float(circ))
+                calc = max(0.0, float(circ) - major_in_float)
+            elif major_pct >= 5.0:
+                calc = max(0.0, float(circ) * (1.0 - float(major_pct) / 100.0))
+            else:
+                calc = float(circ)
+
+        em = float(freeliqci) if freeliqci and freeliqci > 0 else None
+        # 自由流通不应超过流通股本（个别东财行 FREELIQCI>UNLIMITED）
+        if em is not None and circ is not None:
+            em = min(em, float(circ))
+        if calc is not None and circ is not None:
+            calc = min(calc, float(circ))
+        if em is not None and calc is not None:
+            # EM lower/equal → more refined exclusions; EM much higher → stale.
+            if em <= calc * 1.05:
+                return em
+            return calc
+        if em is not None:
+            return em
+        return calc
 
     async def fetch_region(self, code: str) -> str:
         profile = await self.fetch_company_profile(code)
@@ -1608,22 +1705,40 @@ class EastMoneyClient:
             except Exception:
                 return None
 
-        async def _safe_free():
+        async def _safe_equity():
             try:
-                return await self.fetch_free_float_shares(code)
+                return await self.fetch_equity_structure(code)
             except Exception:
                 return None
 
-        quote, profile, concepts, holders_pack, free_shares = await asyncio.gather(
+        quote, profile, concepts, holders_pack, equity = await asyncio.gather(
             _safe_quote(),
             _safe_profile(),
             _safe_concepts(),
             _safe_holders(),
-            _safe_free(),
+            _safe_equity(),
         )
 
         price = float(quote.get("price") or 0)
-        free_float_mv = round(free_shares * price, 2) if free_shares and price else None
+        total_mv = float(quote.get("total_mv") or 0) or None
+        float_mv = float(quote.get("float_mv") or 0) or None
+        holders_list = (holders_pack or {}).get("holders") or []
+        holders_pct = (holders_pack or {}).get("total_pct")
+        holders_end = (holders_pack or {}).get("end_date") or ""
+        maj_pct, maj_shares = self._major_holder_stats(holders_list)
+        eq = equity or {}
+        free_shares = self.resolve_free_float_shares(
+            freeliqci=eq.get("freeliqci_shares"),
+            unlimited=eq.get("unlimited_shares"),
+            total=eq.get("total_shares"),
+            float_mv=float_mv,
+            price=price or None,
+            major_pct=maj_pct,
+            major_shares=maj_shares,
+        )
+        free_float_mv = (
+            round(float(free_shares) * price, 2) if free_shares and price else None
+        )
         industry = profile.get("industry") or ""
         if not concepts and industry:
             concepts = [industry]
@@ -1635,9 +1750,6 @@ class EastMoneyClient:
                 uniq.append(c)
         concepts = uniq[:8]
 
-        holders_list = (holders_pack or {}).get("holders") or []
-        holders_pct = (holders_pack or {}).get("total_pct")
-        holders_end = (holders_pack or {}).get("end_date") or ""
         former_names = profile.get("former_names") or []
         if not isinstance(former_names, list):
             former_names = []
@@ -1647,8 +1759,8 @@ class EastMoneyClient:
             "name": quote.get("name") or profile.get("name") or "",
             "price": price or None,
             "change_pct": quote.get("change_pct"),
-            "total_mv": quote.get("total_mv") or None,
-            "float_mv": quote.get("float_mv") or None,
+            "total_mv": total_mv,
+            "float_mv": float_mv,
             "free_float_mv": free_float_mv,
             "top10_holder_pct": holders_pct,
             "top10_holders": holders_list,
@@ -1967,10 +2079,17 @@ class EastMoneyClient:
             code = str(r.get("f2") or "").zfill(6)
             if not code.isdigit():
                 continue
+            name = str(r.get("f4") or code).strip()
+            # 新股申购/上市首日（N/C 前缀）涨幅失真，不进竞价榜
+            if name.startswith(("N", "C", "n", "c")):
+                continue
             price = float(r.get("f8") or 0)
             noe = float(r.get("f6") or 0)
             pct = float(r.get("f7") or 0)
             amount = float(r.get("f11") or 0)
+            # 北交所约 30%、主板 10%、双创 20%；>31 多为脏数据
+            if abs(pct) > 31:
+                continue
             # 非一字榜 f6 常与涨幅同量级，不可当未匹配额；仅 sk=1 信 seal
             is_yizhi = sk == "1" and noe > 0 and price > 0
             seal = noe if is_yizhi else 0.0
@@ -1979,7 +2098,7 @@ class EastMoneyClient:
             out.append(
                 {
                     "code": code,
-                    "name": str(r.get("f4") or code),
+                    "name": name or code,
                     "price": price,
                     "last_price": price,
                     "auction_pct": pct,

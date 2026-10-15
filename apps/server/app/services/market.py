@@ -109,6 +109,56 @@ def _fmt_money(v: float) -> str:
     return f"{v:.0f}"
 
 
+def _free_float_looks_wrong(fund: dict[str, Any] | None) -> bool:
+    """自由流通误用流通股本：接近全流通(流通≈总市值)且自由流通≈流通，同时有≥5%大股东。
+
+    限售占比高的次新股常有「自由流通≈流通 << 总市值」，属正常，不判错。
+    """
+    if not fund:
+        return False
+    try:
+        free_mv = fund.get("free_float_mv")
+        if free_mv is None:
+            return False
+        free_mv = float(free_mv)
+        float_mv = float(fund.get("float_mv") or 0)
+        total_mv = float(fund.get("total_mv") or 0)
+        ref = float_mv or total_mv
+        if ref <= 0 or free_mv <= 0:
+            return False
+        # 允许少量价差；接近重合才视为异常
+        if free_mv < ref * 0.97:
+            return False
+        # 流通远小于总市值 → 大股东多在限售里，自由流通≈流通合理
+        if total_mv > 0 and float_mv > 0 and float_mv < total_mv * 0.95:
+            return False
+        holders = fund.get("top10_holders") or []
+        if isinstance(holders, str):
+            import json as _json
+
+            try:
+                holders = _json.loads(holders)
+            except Exception:
+                holders = []
+        maj = 0.0
+        for h in holders if isinstance(holders, list) else []:
+            try:
+                r = float((h or {}).get("ratio") or 0)
+            except (TypeError, ValueError):
+                continue
+            if r >= 5.0:
+                maj += r
+        if maj < 5.0:
+            try:
+                top10 = float(fund.get("top10_holder_pct") or 0)
+            except (TypeError, ValueError):
+                top10 = 0.0
+            return top10 >= 30.0
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
 def _fund_list_complete(fund: dict[str, Any] | None) -> bool:
     """列表展示所需字段是否齐全（地域 / 自由流通 / 十大股东）。"""
     if not fund:
@@ -116,6 +166,8 @@ def _fund_list_complete(fund: dict[str, Any] | None) -> bool:
     if not (fund.get("region") or "").strip():
         return False
     if fund.get("free_float_mv") is None:
+        return False
+    if _free_float_looks_wrong(fund):
         return False
     if fund.get("top10_holder_pct") is None:
         return False
@@ -129,7 +181,10 @@ def _apply_fund_fields(stock: StockItem, fund: dict[str, Any]) -> None:
         stock.region = fund["region"]
     if fund.get("industry"):
         stock.industry = fund["industry"] or stock.industry
-    if fund.get("free_float_mv") is not None:
+    if _free_float_looks_wrong(fund):
+        # 清掉错误值，等待后台按 ≥5% 规则重算
+        stock.free_float_mv = None
+    elif fund.get("free_float_mv") is not None:
         stock.free_float_mv = fund["free_float_mv"]
     if fund.get("top10_holder_pct") is not None:
         stock.top10_holder_pct = fund["top10_holder_pct"]
@@ -160,6 +215,8 @@ class MarketService:
         self._y_zt: list[dict[str, Any]] = []
         self._y_zb_count = 0
         self._y_dt_count = 0
+        # _y_zt 对应的「今日」交易日锚点；换日后才允许整表替换昨日池
+        self._y_anchor_trade: str = ""
         self._listeners: list[asyncio.Queue] = []
         self._fund_broadcast_pending = False
         self._fail_quote_cache: dict[str, dict[str, Any]] = {}
@@ -268,7 +325,10 @@ class MarketService:
         trade_zt: list[dict[str, Any]],
         trade_zb: list[dict[str, Any]],
     ) -> None:
-        """相对 trade_date 的上一交易日涨停池（供连板天梯晋级/炸板归桶）。"""
+        """相对 trade_date 的上一交易日涨停池（供连板天梯晋级/炸板归桶）。
+
+        东财偶发空包/截断时禁止清空或用瘦包覆盖，否则天梯「仅败」档位（如 3进4）会整行闪没。
+        """
         from datetime import timedelta
 
         trade_fp = _pool_fingerprint(trade_zt, trade_zb)
@@ -285,15 +345,28 @@ class MarketService:
                     # 仍是 trade_date 的镜像，继续往前
                     d = d - timedelta(days=1)
                     continue
+                # 只有 zb/dt、涨停池为空 → 不可信，继续找或保留旧值
+                if not rows:
+                    d = d - timedelta(days=1)
+                    continue
+                same_anchor = self._y_anchor_trade == trade_date and bool(self._y_zt)
+                # 同交易日锚点下，瘦包/截断不覆盖已有完整昨日池
+                if same_anchor and len(rows) < max(8, int(len(self._y_zt) * 0.7)):
+                    return
                 self._y_zt = rows
                 self._y_zb_count = len(zb)
                 self._y_dt_count = len(dt)
+                self._y_anchor_trade = trade_date
                 return
             d = d - timedelta(days=1)
 
+        # 全失败：保留旧值，切勿清成 []（否则晋级失败档整批消失）
+        if self._y_zt:
+            return
         self._y_zt = []
         self._y_zb_count = 0
         self._y_dt_count = 0
+        self._y_anchor_trade = ""
 
     async def warmup_yesterday(self) -> None:
         """启动时预热：解析最新交易日，并加载其上一交易日。"""
@@ -735,6 +808,76 @@ class MarketService:
             for k, _ in oldest:
                 self._batch_quote_cache.pop(k, None)
         return list(items)
+
+    @staticmethod
+    def _ladder_stock_count(ladder: list[LadderGroup]) -> int:
+        return sum(len(g.stocks) for g in ladder)
+
+    def _stabilize_ladder(
+        self,
+        prev: list[LadderGroup],
+        new: list[LadderGroup],
+        trade_date: str,
+    ) -> list[LadderGroup]:
+        """防止轮询偶发瘦包把某档（尤其仅含「败」的 N进N+1）整行弄丢。"""
+        if not prev:
+            return new
+        if self.snapshot.trade_date and self.snapshot.trade_date != trade_date:
+            return new
+
+        prev_n = self._ladder_stock_count(prev)
+        new_n = self._ladder_stock_count(new)
+        if prev_n >= 5 and new_n < max(3, int(prev_n * 0.6)):
+            return list(prev)
+
+        new_map = {g.key: g for g in new}
+        changed = False
+
+        for g in prev:
+            if g.key == "first" or not g.stocks:
+                continue
+            cur = new_map.get(g.key)
+            if cur is None:
+                # 整档消失（常见：昨日池瞬时空 → 仅败股档没了）
+                new_map[g.key] = g
+                changed = True
+                continue
+            have = {s.code for s in cur.stocks}
+            # 只回补「败」：成/炸应由今日池驱动，避免用陈旧成/炸盖住真实状态
+            extra = [
+                s
+                for s in g.stocks
+                if s.code not in have and s.status == StockStatus.FAIL
+            ]
+            if not extra:
+                continue
+            stocks = list(cur.stocks) + extra
+            success = sum(1 for s in stocks if s.status == StockStatus.SUCCESS)
+            total = len(stocks)
+            rate = (
+                f"{success}/{total}={round(success / total * 100)}%"
+                if total
+                else "0/0=0%"
+            )
+            new_map[g.key] = cur.model_copy(
+                update={"stocks": stocks, "promotion_rate": rate}
+            )
+            changed = True
+
+        if not changed:
+            return new
+
+        # 保持高连板在上、首板在底
+        body = [new_map[k] for k in new_map if k != "first"]
+        body.sort(
+            key=lambda g: int(str(g.key).split("-")[0])
+            if "-" in str(g.key)
+            else 0,
+            reverse=True,
+        )
+        if "first" in new_map:
+            body.append(new_map["first"])
+        return body
 
     def _build_ladder(
         self,
@@ -1199,6 +1342,7 @@ class MarketService:
             )
 
             speech = self._diff_speech(zt, zb)
+            prev_ladder = list(self.snapshot.ladder or [])
             ladder = self._build_ladder(zt, zb, self._y_zt)
             try:
                 ladder = await asyncio.wait_for(self._enrich_ladder_fails(ladder), timeout=12)
@@ -1208,6 +1352,7 @@ class MarketService:
                     ladder = await self._enrich_ladder_fails_from_cache(ladder)
                 except Exception:
                     pass
+            ladder = self._stabilize_ladder(prev_ladder, ladder, date)
 
             # 合并本地基本面缓存到全市场列表，并排队补齐缺失字段
             await self._merge_and_enqueue_funds(zt + lb + zb + dt)
@@ -1578,6 +1723,9 @@ class MarketService:
                 _apply_fund_fields(s, fund)
                 if _fund_list_complete(fund):
                     self._fund_complete.add(s.code)
+                else:
+                    # 残缺或自由流通异常：允许重新入队重算
+                    self._fund_complete.discard(s.code)
             if s.code in self._fund_complete or s.code in self._fund_inflight:
                 continue
             # 失败/残缺冷却 45 秒，避免狂打接口
@@ -1658,7 +1806,13 @@ class MarketService:
         ttl = 30 * 60 if _is_trading_time() else 6 * 3600
         if not force:
             cached = await get_fundamentals(code)
-            if cached and cached.get("updated_at") and _fund_list_complete(cached):
+            # 自由流通误用流通/总市值时跳过缓存，强制重算
+            if (
+                cached
+                and cached.get("updated_at")
+                and _fund_list_complete(cached)
+                and not _free_float_looks_wrong(cached)
+            ):
                 try:
                     ts = datetime.fromisoformat(cached["updated_at"])
                     age = (datetime.now() - ts).total_seconds()
@@ -1673,7 +1827,7 @@ class MarketService:
 
         data = await self.client.fetch_fundamentals(code)
         data["updated_at"] = datetime.now().isoformat(timespec="seconds")
-        # 若新结果缺字段而旧缓存有，合并保留
+        # 若新结果缺字段而旧缓存有，合并保留（错误的自由流通不继承）
         try:
             old = await get_fundamentals(code)
         except Exception:
@@ -1692,6 +1846,8 @@ class MarketService:
                 "float_mv",
             ):
                 if data.get(k) in (None, "", []) and old.get(k) not in (None, "", []):
+                    if k == "free_float_mv" and _free_float_looks_wrong(old):
+                        continue
                     data[k] = old[k]
         await upsert_fundamentals(code, data)
         seal_r, board_r = await calc_year_rates(code)
@@ -2519,6 +2675,9 @@ class MarketService:
         self._auction_prev_cache: tuple[float, dict[str, Any]] | None = None
         self._auction_region_cache: dict[str, str] = {}
 
+    # 开盘集合竞价 9:15–9:25；9:25 后留约 45s 写完 0925 快照即停轮询，避免与涨停天梯争抢
+    _AUCTION_END = time(9, 25, 45)
+
     @staticmethod
     def _auction_phase(now: datetime | None = None) -> str:
         """idle | auction | after"""
@@ -2526,9 +2685,9 @@ class MarketService:
         if now.weekday() >= 5:
             return "idle"
         t = now.time()
-        if time(9, 15) <= t < time(9, 30):
+        if time(9, 15) <= t < MarketService._AUCTION_END:
             return "auction"
-        if t >= time(9, 30):
+        if t >= MarketService._AUCTION_END:
             return "after"
         return "idle"
 
@@ -2538,8 +2697,8 @@ class MarketService:
 
         - 工作日 9:10 前 / 周末：展示上一交易日
         - 9:10–9:15：清空，准备当日竞价
-        - 9:15–9:30：竞价中
-        - 9:30 后：盘后今日
+        - 9:15–9:25:45：竞价中（含 0925 快照落库）
+        - 9:25:45 后：冻结今日竞价，不再轮询
         """
         now = now or datetime.now()
         if now.weekday() >= 5:
@@ -2549,7 +2708,7 @@ class MarketService:
             return "display_prev"
         if t < time(9, 15):
             return "warming"
-        if t < time(9, 30):
+        if t < MarketService._AUCTION_END:
             return "auction"
         return "after"
 
@@ -2588,7 +2747,7 @@ class MarketService:
             return "0915"
         if time(9, 20) <= t < time(9, 25):
             return "0920"
-        if time(9, 25) <= t < time(9, 30):
+        if time(9, 25) <= t < MarketService._AUCTION_END:
             return "0925"
         return None
 
@@ -2838,7 +2997,7 @@ class MarketService:
 
     @staticmethod
     def _updated_at_in_auction_window(updated_at: str, trade_date: str) -> bool:
-        """仅信任竞价窗口(09:15–09:30)写入的 seal；盘后误写一律丢弃。"""
+        """仅信任竞价窗口(09:15–09:25:45)写入的 seal；盘后误写一律丢弃。"""
         raw = (updated_at or "").strip()
         if not raw:
             return False
@@ -2853,7 +3012,7 @@ class MarketService:
         if ds and dt.strftime("%Y%m%d") != ds:
             return False
         t = dt.time()
-        return time(9, 15) <= t < time(9, 30)
+        return time(9, 15) <= t < MarketService._AUCTION_END
 
     async def refresh_auction(self, *, force_slot: bool = False) -> list[dict[str, Any]]:
         """竞价时段拉取全市场观察池并落库；返回 enrichment 后的 live 列表。
@@ -2903,68 +3062,104 @@ class MarketService:
                 if code.isdigit():
                     seed_codes.append(code)
 
-            # 竞价中：观察池补盘口；jjyd 涨幅榜保证非一字 Top 不丢
-            try:
-                raw = await self.client.fetch_auction_market_pool(
-                    limit=350, fast=True, seed_codes=seed_codes
-                )
-            except Exception:
-                raw = []
-
-            by = {str(x.get("code") or "").zfill(6): x for x in raw}
-            # 官方竞价涨幅榜覆盖/补齐非一字（f7/f11 为准）
+            # 竞价中：以东财 jjyd 涨幅榜+一字为主宇宙（对齐东财 App），腾讯只补实时/市值
             yizi_codes = {
                 str(y.get("code") or "").zfill(6) for y in em_yizi if y.get("code")
             }
+            rank_codes = [
+                str(y.get("code") or "").zfill(6)
+                for y in em_rank
+                if str(y.get("code") or "").zfill(6).isdigit()
+            ]
+            quote_codes = list(
+                dict.fromkeys(
+                    [c for c in rank_codes if c not in yizi_codes]
+                    + list(yizi_codes)
+                    + [str(c).zfill(6) for c in seed_codes if str(c).isdigit()]
+                )
+            )
+            try:
+                quotes = await self.client.fetch_quotes_tencent_batch(
+                    quote_codes[:500]
+                )
+            except Exception:
+                quotes = {}
+
+            by: dict[str, dict[str, Any]] = {}
             for y in em_rank:
                 code = str(y.get("code") or "").zfill(6)
                 if not code.isdigit() or code in yizi_codes:
                     continue
-                cur = by.get(code) or {}
+                q = quotes.get(code) or {}
+                name = str(y.get("name") or q.get("name") or code)
+                if name.startswith(("N", "C", "n", "c")):
+                    continue
+                pct = float(y.get("auction_pct") or 0)
+                if abs(pct) > 31:
+                    continue
+                last = float(q.get("price") or 0)
+                live_pct = float(q.get("change_pct") or 0)
+                if abs(live_pct) < 1e-12 and last > 0:
+                    prev = float(q.get("prev_close") or 0)
+                    if prev > 0:
+                        live_pct = round((last - prev) / prev * 100, 2)
                 by[code] = {
-                    **cur,
                     **y,
                     "is_yizhi": False,
                     "seal_amount": 0.0,
-                    "auction_pct": float(y.get("auction_pct") or 0),
-                    "amount": float(y.get("amount") or cur.get("amount") or 0),
-                    "change_pct": float(
-                        cur.get("change_pct") or y.get("change_pct") or 0
-                    ),
-                    "float_mv": float(cur.get("float_mv") or 0),
-                    "industry": cur.get("industry") or y.get("industry") or "",
-                    "concepts": cur.get("concepts") or y.get("concepts") or [],
-                    "price": float(y.get("price") or cur.get("price") or 0),
-                    "last_price": float(
-                        cur.get("last_price") or y.get("price") or 0
-                    ),
+                    "auction_pct": pct,
+                    "amount": float(y.get("amount") or 0),
+                    "price": float(y.get("price") or last or 0),
+                    "last_price": last if last > 0 else float(y.get("price") or 0),
+                    "change_pct": live_pct,
+                    "float_mv": float(q.get("float_mv") or 0),
+                    "industry": str(q.get("industry") or y.get("industry") or ""),
+                    "concepts": [],
+                    "market": str(q.get("market") or y.get("market") or ""),
+                    "name": name,
                 }
-            # 官方一字（新鲜）覆盖盘口判定，补未匹配额/成交额
             for y in em_yizi:
                 code = str(y.get("code") or "").zfill(6)
                 if not code.isdigit():
                     continue
-                cur = by.get(code) or {}
+                q = quotes.get(code) or {}
+                last = float(q.get("price") or 0)
+                live_pct = float(q.get("change_pct") or 0)
+                if abs(live_pct) < 1e-12 and last > 0:
+                    prev = float(q.get("prev_close") or 0)
+                    if prev > 0:
+                        live_pct = round((last - prev) / prev * 100, 2)
                 by[code] = {
-                    **cur,
                     **y,
                     "is_yizhi": True,
                     "seal_amount": float(y.get("seal_amount") or 0),
                     "auction_pct": float(y.get("auction_pct") or 0),
-                    "amount": float(y.get("amount") or cur.get("amount") or 0),
-                    "change_pct": float(
-                        cur.get("change_pct") or y.get("change_pct") or 0
-                    ),
-                    "float_mv": float(cur.get("float_mv") or 0),
-                    "industry": cur.get("industry") or y.get("industry") or "",
-                    "concepts": cur.get("concepts") or y.get("concepts") or [],
+                    "amount": float(y.get("amount") or 0),
+                    "price": float(y.get("price") or last or 0),
+                    "last_price": last if last > 0 else float(y.get("price") or 0),
+                    "change_pct": live_pct,
+                    "float_mv": float(q.get("float_mv") or 0),
+                    "industry": str(q.get("industry") or ""),
+                    "concepts": [],
+                    "market": str(q.get("market") or y.get("market") or ""),
                     "limit_up": float(
-                        cur.get("limit_up")
-                        or y.get("limit_up")
-                        or y.get("price")
-                        or 0
+                        y.get("limit_up") or y.get("price") or 0
                     ),
                 }
+
+            # jjyd 短暂为空时兜底观察池，避免整表空白
+            if not by:
+                try:
+                    raw = await self.client.fetch_auction_market_pool(
+                        limit=350, fast=True, seed_codes=seed_codes
+                    )
+                except Exception:
+                    raw = []
+                for x in raw:
+                    code = str(x.get("code") or "").zfill(6)
+                    if code.isdigit():
+                        by[code] = x
+
             raw = list(by.values())
             rows = await self._enrich_auction_rows(raw)
             self._auction_live = rows
@@ -2974,8 +3169,23 @@ class MarketService:
             slot = self._auction_active_slot(now)
             if slot and rows and self._auction_phase(datetime.now()) == "auction":
                 write_key = f"{ds}:{slot}"
-                # 默认首次有效写入后冻结；手动刷新可强制覆盖当前时段
-                if force_slot or write_key not in self._auction_written:
+                non_yizhi_n = sum(1 for r in rows if not r.get("is_yizhi"))
+                # 0925 若几乎只有一字，多半是 jjyd/池未就绪，延后冻结避免污染次日展示
+                too_thin = (
+                    slot == "0925"
+                    and non_yizhi_n < 30
+                    and now.time() < time(9, 27)
+                    and not force_slot
+                )
+                already = write_key in self._auction_written
+                # 已冻结但是残缺一字-only：9:27 后允许用完整榜覆盖一次
+                can_repair = (
+                    already
+                    and slot == "0925"
+                    and non_yizhi_n >= 30
+                    and now.time() >= time(9, 27)
+                )
+                if not too_thin and (force_slot or not already or can_repair):
                     try:
                         await replace_auction_slot(
                             ds, slot, rows, self._auction_live_at
@@ -3000,7 +3210,7 @@ class MarketService:
         return await self.get_auction_board(days=1)
 
     async def auction_loop(self) -> None:
-        """独立竞价轮询：9:10 预热清空；9:15–9:30 拉观察池；开窗前精确对齐。"""
+        """独立竞价轮询：9:10 预热清空；9:15–9:25 拉观察池（9:25 后停，避让天梯）。"""
         from ..db import load_user_config
 
         self.__init_auction_state()
@@ -3052,14 +3262,23 @@ class MarketService:
         *,
         is_today: bool = False,
         live_apply_seal: bool = True,
+        live_universe: bool = False,
     ) -> dict[str, Any]:
         """Merge three slots into per-stock rows; split 一字 / 非一字。
 
         live_apply_seal=False：当前 slot 已冻结，live 只刷新涨幅/成交等，不改 seal 列。
+        live_universe=True：股票集合与竞价涨幅/成交额以 live 为准，历史 slot 只回填 seal_*，
+        避免 9:15 虚高涨幅残留进非一字 Top100。
         """
         by_code: dict[str, dict[str, Any]] = {}
 
-        def upsert(slot: str, row: dict[str, Any], *, apply_seal: bool = True) -> None:
+        def upsert(
+            slot: str,
+            row: dict[str, Any],
+            *,
+            apply_seal: bool = True,
+            apply_quote: bool = True,
+        ) -> None:
             code = str(row.get("code") or "").zfill(6)
             if not code.isdigit():
                 return
@@ -3106,37 +3325,67 @@ class MarketService:
                 cur["region"] = str(row.get("region") or "")
             if row.get("market"):
                 cur["market"] = str(row.get("market") or "")
-            if row.get("is_yizhi"):
-                cur["is_yizhi"] = True
-            if row.get("amount"):
-                cur["amount"] = float(row.get("amount") or 0)
-            if row.get("float_mv"):
-                cur["float_mv"] = float(row.get("float_mv") or 0)
-            if row.get("free_float_mv") is not None:
-                cur["free_float_mv"] = row.get("free_float_mv")
-            if is_today and row.get("change_pct") is not None:
-                cur["change_pct"] = float(row.get("change_pct") or 0)
+            seal = float(row.get("seal_amount") or 0)
             price = float(row.get("price") or 0)
             last_p = float(row.get("last_price") or price or 0)
-            seal = float(row.get("seal_amount") or 0)
             pct = float(row.get("auction_pct") or 0)
-            cur[f"price_{slot}"] = price if price > 0 else None
+            if apply_quote:
+                if row.get("is_yizhi"):
+                    cur["is_yizhi"] = True
+                elif "is_yizhi" in row:
+                    cur["is_yizhi"] = bool(row.get("is_yizhi"))
+                if row.get("amount"):
+                    cur["amount"] = float(row.get("amount") or 0)
+                if row.get("float_mv"):
+                    cur["float_mv"] = float(row.get("float_mv") or 0)
+                if row.get("free_float_mv") is not None:
+                    cur["free_float_mv"] = row.get("free_float_mv")
+                if is_today and row.get("change_pct") is not None:
+                    cur["change_pct"] = float(row.get("change_pct") or 0)
+                cur[f"price_{slot}"] = price if price > 0 else None
+                cur[f"pct_{slot}"] = pct
+                if last_p > 0:
+                    cur["price"] = last_p
+                elif price > 0:
+                    cur["price"] = price
+                cur["auction_pct"] = pct
             if apply_seal:
                 # 未匹配额：仅竞价一字；0/缺失 → None（前端 —）
                 cur[f"seal_{slot}"] = seal if seal > 0 else None
-            cur[f"pct_{slot}"] = pct
-            if last_p > 0:
-                cur["price"] = last_p
-            elif price > 0:
-                cur["price"] = price
-            cur["auction_pct"] = pct
 
-        for slot in ("0915", "0920", "0925"):
-            for row in slots.get(slot) or []:
-                upsert(slot, row, apply_seal=True)
-        if live and live_slot in ("0915", "0920", "0925"):
+        if live_universe and live:
+            # 先铺 live 宇宙（涨幅/成交/实时），再只回填各时段 seal
+            slot_for_live = (
+                live_slot
+                if live_slot in ("0915", "0920", "0925")
+                else "0925"
+            )
             for row in live:
-                upsert(live_slot, row, apply_seal=live_apply_seal)
+                upsert(
+                    slot_for_live,
+                    row,
+                    apply_seal=live_apply_seal
+                    and live_slot == slot_for_live,
+                    apply_quote=True,
+                )
+            for slot in ("0915", "0920", "0925"):
+                for row in slots.get(slot) or []:
+                    code = str(row.get("code") or "").zfill(6)
+                    if code not in by_code:
+                        continue
+                    upsert(slot, row, apply_seal=True, apply_quote=False)
+        else:
+            for slot in ("0915", "0920", "0925"):
+                for row in slots.get(slot) or []:
+                    upsert(slot, row, apply_seal=True, apply_quote=True)
+            if live and live_slot in ("0915", "0920", "0925"):
+                for row in live:
+                    upsert(
+                        live_slot,
+                        row,
+                        apply_seal=live_apply_seal,
+                        apply_quote=True,
+                    )
 
         items = list(by_code.values())
         # 非一字强制清空三时段未匹配额
@@ -3288,7 +3537,8 @@ class MarketService:
         cache_key = (
             f"{display_mode}:{req_date}:{phase}:{live_slot}:{self._auction_live_at}"
         )
-        ttl = 0.35 if phase == "auction" else (2.0 if display_mode == "warming" else 60.0)
+        # 盘后竞价已冻结，拉长缓存，避免前端偶发请求再打库/接口
+        ttl = 0.35 if phase == "auction" else (2.0 if display_mode == "warming" else 120.0)
         cached = self._auction_board_cache
         if (
             cached
@@ -3327,9 +3577,11 @@ class MarketService:
                 live_slot=live_slot,
                 is_today=True,
                 live_apply_seal=not slot_frozen,
+                # 竞价中必须以当前 live 为宇宙，冻结 slot 只贡献 seal 列
+                live_universe=True,
             )
         elif req_date == today:
-            # 盘后今日：jjyd sk=1 一字 + sk=0 竞价涨幅榜 Top（对齐东财，避免 clist 漏票）
+            # 盘后今日：jjyd 定竞价涨幅/一字，库内 seal 回填 9:15/9:20；腾讯刷实时涨幅
             db_slots = await load_auction_day(req_date)
             try:
                 em_yizi = await self.client.fetch_em_auction_yizhi()
@@ -3342,7 +3594,6 @@ class MarketService:
             yizi_codes = {
                 str(y.get("code") or "").zfill(6) for y in em_yizi if y.get("code")
             }
-            # 腾讯补流通市值/实时涨幅；候选=一字+涨幅榜
             enrich_codes = list(yizi_codes) + [
                 str(y.get("code") or "").zfill(6)
                 for y in em_rank
@@ -3376,7 +3627,7 @@ class MarketService:
                         "market": str(q.get("market") or y.get("market") or ""),
                     }
                 )
-            yizi_rows = []
+            yizi_rows: list[dict[str, Any]] = []
             for y in em_yizi:
                 code = str(y.get("code") or "").zfill(6)
                 q = quotes.get(code) or {}
@@ -3395,56 +3646,71 @@ class MarketService:
                         "market": str(q.get("market") or y.get("market") or ""),
                     }
                 )
-            merged = yizi_rows + other_raw
-            rows = await self._enrich_auction_rows(merged)
-            trusted = self._trusted_auction_seal_map(db_slots, req_date)
-            synth_rows = []
-            for r in rows:
-                code = str(r.get("code") or "").zfill(6)
-                item = dict(r)
-                if item.get("is_yizhi"):
-                    seals = trusted.get(code) or {}
-                    item["_seal_0915"] = seals.get("0915")
-                    item["_seal_0920"] = seals.get("0920")
-                    item["_seal_0925"] = float(item.get("seal_amount") or 0) or None
-                else:
-                    item["seal_amount"] = 0.0
-                    item["_seal_0915"] = None
-                    item["_seal_0920"] = None
-                    item["_seal_0925"] = None
-                synth_rows.append(item)
-            synth = {"0915": [], "0920": [], "0925": synth_rows}
-            col = self._merge_auction_day_columns(
-                req_date,
-                synth,
-                live=None,
-                live_slot=None,
-                is_today=True,
-            )
-            for x in col.get("items") or []:
-                code = str(x.get("code") or "").zfill(6)
-                src = next(
-                    (r for r in synth_rows if str(r.get("code")) == code), None
+            # jjyd 尚未就绪：回退库 / 内存 live
+            if not yizi_rows and not other_raw:
+                col = await self._load_history_auction_column(req_date)
+                if not (col.get("items") or []) and self._auction_live:
+                    col = self._merge_auction_day_columns(
+                        req_date,
+                        {"0915": [], "0920": [], "0925": []},
+                        live=list(self._auction_live),
+                        live_slot="0925",
+                        is_today=True,
+                        live_apply_seal=True,
+                        live_universe=True,
+                    )
+            else:
+                rows = await self._enrich_auction_rows(yizi_rows + other_raw)
+                trusted = self._trusted_auction_seal_map(db_slots, req_date)
+                synth_rows: list[dict[str, Any]] = []
+                for r in rows:
+                    code = str(r.get("code") or "").zfill(6)
+                    item = dict(r)
+                    if item.get("is_yizhi"):
+                        seals = trusted.get(code) or {}
+                        item["_seal_0915"] = seals.get("0915")
+                        item["_seal_0920"] = seals.get("0920")
+                        item["_seal_0925"] = (
+                            float(item.get("seal_amount") or 0) or None
+                        )
+                    else:
+                        item["seal_amount"] = 0.0
+                        item["_seal_0915"] = None
+                        item["_seal_0920"] = None
+                        item["_seal_0925"] = None
+                    synth_rows.append(item)
+                col = self._merge_auction_day_columns(
+                    req_date,
+                    {"0915": [], "0920": [], "0925": synth_rows},
+                    live=None,
+                    live_slot=None,
+                    is_today=True,
                 )
-                if not src:
-                    continue
-                if src.get("is_yizhi"):
-                    x["is_yizhi"] = True
-                    x["seal_0915"] = src.get("_seal_0915")
-                    x["seal_0920"] = src.get("_seal_0920")
-                    x["seal_0925"] = src.get("_seal_0925")
-                    x["auction_pct"] = float(src.get("auction_pct") or 0)
-                    x["amount"] = float(src.get("amount") or 0)
-                else:
-                    x["is_yizhi"] = False
-                    x["seal_0915"] = None
-                    x["seal_0920"] = None
-                    x["seal_0925"] = None
-            col = self._finalize_auction_column_sort(col)
+                for x in col.get("items") or []:
+                    code = str(x.get("code") or "").zfill(6)
+                    src = next(
+                        (r for r in synth_rows if str(r.get("code")) == code),
+                        None,
+                    )
+                    if not src:
+                        continue
+                    if src.get("is_yizhi"):
+                        x["is_yizhi"] = True
+                        x["seal_0915"] = src.get("_seal_0915")
+                        x["seal_0920"] = src.get("_seal_0920")
+                        x["seal_0925"] = src.get("_seal_0925")
+                        x["auction_pct"] = float(src.get("auction_pct") or 0)
+                        x["amount"] = float(src.get("amount") or 0)
+                    else:
+                        x["is_yizhi"] = False
+                        x["seal_0915"] = None
+                        x["seal_0920"] = None
+                        x["seal_0925"] = None
+                col = self._finalize_auction_column_sort(col)
         else:
             col = await self._load_history_auction_column(req_date)
 
-        # 仅「当日 live」刷实时涨幅/股价/市值，绝不覆盖竞价涨幅与竞价成交额
+        # 当日 live：刷实时涨幅/股价/市值，不覆盖竞价涨幅与竞价成交额
         if is_live_today and (col.get("items") or []):
             codes = [str(x.get("code")) for x in col["items"] if x.get("code")]
             try:
@@ -3457,7 +3723,6 @@ class MarketService:
                     continue
                 last = float(q.get("price") or 0)
                 prev = float(q.get("prev_close") or 0)
-                open_p = float(q.get("open") or 0)
                 if last > 0:
                     x["price"] = last
                 live_pct = float(q.get("change_pct") or 0)
@@ -3466,13 +3731,6 @@ class MarketService:
                 x["change_pct"] = live_pct
                 if q.get("float_mv"):
                     x["float_mv"] = float(q.get("float_mv") or 0)
-                if (
-                    phase != "auction"
-                    and not x.get("is_yizhi")
-                    and open_p > 0
-                    and prev > 0
-                ):
-                    x["auction_pct"] = round((open_p - prev) / prev * 100, 2)
                 if not x.get("is_yizhi"):
                     x["seal_0915"] = None
                     x["seal_0920"] = None
@@ -3502,12 +3760,12 @@ class MarketService:
     async def get_auction_prev_ladder(self) -> dict[str, Any]:
         """昨日涨停股 + 今日竞价涨幅，按连板数分组（对齐天梯晋级视角）。
 
-        竞价涨幅口径：竞价中用撮合价/昨收；盘后用开盘价/昨收（=9:25 结果）。
-        仅停牌（无开盘价）才为空。
+        竞价涨幅口径：竞价中用撮合价/昨收；9:25 后冻结竞价快照，不再拉实时行情。
         """
         self.__init_auction_state()
         phase = self._auction_phase()
-        ttl = 0.35 if phase == "auction" else 5.0
+        # 盘后数据已冻结，长缓存即可；避免与涨停天梯争抢行情接口
+        ttl = 0.35 if phase == "auction" else 120.0
         now_ts = datetime.now().timestamp()
 
         # 「今日」用竞价会话日历日，不用滞后的涨停池 trade_date。
@@ -3522,7 +3780,7 @@ class MarketService:
             if str(hit.get("trade_date") or "") == today:
                 return hit
 
-        # 核心口径：上一交易日东财涨停池 + 今日竞价/开盘涨幅
+        # 核心口径：上一交易日东财涨停池 + 今日竞价涨幅（冻结后不刷实时）
         prev_ds, prev_rows = await self._prev_trade_zt_pool(today)
 
         codes = [
@@ -3530,42 +3788,72 @@ class MarketService:
             for r in prev_rows
             if str(r.get("code") or "").zfill(6).isdigit()
         ]
-        # 全量昨涨停股拉行情：竞价中=撮合价涨幅；盘后=开盘价涨幅（=9:25 结果）
+        code_set = set(codes)
         pct_map: dict[str, float] = {}
         name_map: dict[str, str] = {}
         suspended: set[str] = set()
-        try:
-            quotes = await self.client.fetch_quotes_tencent_batch(codes)
-        except Exception:
-            quotes = {}
-        for code, q in (quotes or {}).items():
-            name_map[code] = str(q.get("name") or "")
-            prev = float(q.get("prev_close") or 0)
-            open_p = float(q.get("open") or 0)
-            last = float(q.get("price") or 0)
-            if phase == "auction":
+
+        # 优先用竞价 live / 落库快照中的 auction_pct
+        for r in self._auction_live:
+            code = str(r.get("code") or "").zfill(6)
+            if code not in code_set:
+                continue
+            pct_map[code] = float(r.get("auction_pct") or 0)
+            if r.get("name"):
+                name_map[code] = str(r.get("name") or "")
+
+        if phase != "auction":
+            try:
+                db_slots = await load_auction_day(today)
+            except Exception:
+                db_slots = {}
+            for slot in ("0925", "0920", "0915"):
+                for r in db_slots.get(slot) or []:
+                    code = str(r.get("code") or "").zfill(6)
+                    if code not in code_set or code in pct_map:
+                        continue
+                    if r.get("auction_pct") is None and not r.get("name"):
+                        continue
+                    pct_map[code] = float(r.get("auction_pct") or 0)
+                    if r.get("name"):
+                        name_map[code] = str(r.get("name") or "")
+
+        # 竞价中：腾讯补撮合价；盘后仅在快照全空时一次性用开盘价回填（不轮询）
+        need_quotes = False
+        use_open = False
+        if phase == "auction":
+            need_quotes = True
+        elif not pct_map and codes:
+            need_quotes = True
+            use_open = True
+        if need_quotes:
+            missing = [c for c in codes if c not in pct_map] if phase == "auction" else codes
+            try:
+                quotes = await self.client.fetch_quotes_tencent_batch(missing or codes)
+            except Exception:
+                quotes = {}
+            for code, q in (quotes or {}).items():
+                if q.get("name"):
+                    name_map[code] = str(q.get("name") or "")
+                prev = float(q.get("prev_close") or 0)
+                open_p = float(q.get("open") or 0)
+                last = float(q.get("price") or 0)
+                if use_open:
+                    if open_p <= 0:
+                        suspended.add(code)
+                        continue
+                    if prev > 0 and code not in pct_map:
+                        pct_map[code] = round((open_p - prev) / prev * 100, 2)
+                    continue
                 if last <= 0:
                     suspended.add(code)
+                    continue
+                if code in pct_map:
                     continue
                 pct = float(q.get("change_pct") or 0)
                 if abs(pct) < 1e-12 and prev > 0:
                     pct = round((last - prev) / prev * 100, 2)
                 pct_map[code] = pct
-            else:
-                if open_p <= 0:
-                    suspended.add(code)
-                    continue
-                if prev > 0:
-                    pct_map[code] = round((open_p - prev) / prev * 100, 2)
-
-        # live 覆盖（竞价中更准）
-        if phase == "auction":
-            for r in self._auction_live:
-                code = str(r.get("code") or "").zfill(6)
-                if code in codes:
-                    pct_map[code] = float(r.get("auction_pct") or 0)
-                    if r.get("name"):
-                        name_map[code] = str(r.get("name") or "")
 
         def _market_of(code: str) -> str:
             if code.startswith(("300", "301")):

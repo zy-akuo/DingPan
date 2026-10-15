@@ -135,12 +135,16 @@ function contentSignature(data: unknown): string {
   return JSON.stringify(rest);
 }
 
-/** 9:10 起加强轮询（预热清空 + 竞价），对齐服务端 display_mode */
+/** 9:10 起加强轮询（预热清空 + 竞价），9:25 后停止，对齐服务端 */
 function isLocalAuctionWindow(now = new Date()): boolean {
   const day = now.getDay();
   if (day === 0 || day === 6) return false;
   const mins = now.getHours() * 60 + now.getMinutes();
-  return mins >= 9 * 60 + 10 && mins < 9 * 60 + 30;
+  const sec = now.getSeconds();
+  // 与服务端 _AUCTION_END=09:25:45 对齐：9:26 起不再轮询
+  if (mins > 9 * 60 + 25) return false;
+  if (mins === 9 * 60 + 25 && sec >= 45) return false;
+  return mins >= 9 * 60 + 10;
 }
 
 function boardStatusTag(data: BoardPayload | null | undefined) {
@@ -338,7 +342,6 @@ function AuctionTableHeader() {
       <span className="col-t col-t925">9:25</span>
       <span className="col-num col-auction-pct">竞价涨幅</span>
       <span className="col-num">竞价成交额</span>
-      <span className="col-num">实时涨幅</span>
       <span className="col-num">流通市值</span>
       <span className="col-num">自由流通市值</span>
       <span className="col-num">股价</span>
@@ -352,13 +355,11 @@ function AuctionTableRow({
   stock,
   searching,
   hit,
-  isToday,
   onOpen,
 }: {
   stock: AuctionStock;
   searching: boolean;
   hit: boolean;
-  isToday: boolean;
   onOpen?: (s: StockItem) => void;
 }) {
   const dim = searching && !hit;
@@ -390,9 +391,6 @@ function AuctionTableRow({
         {pctText(stock.auction_pct)}
       </span>
       <span className="col-num">{mvText(stock.amount)}</span>
-      <span className={`col-num ${pctClass(isToday ? stock.change_pct : null)}`}>
-        {isToday ? pctText(stock.change_pct) : "—"}
-      </span>
       <span className="col-num">{mvText(stock.float_mv)}</span>
       <span className="col-num">{mvText(stock.free_float_mv)}</span>
       <span className="col-num">{priceText(stock.price)}</span>
@@ -450,7 +448,6 @@ function AuctionBoardTab({
   }, [applyPayload, refreshing]);
 
   const col = data?.column;
-  const isToday = !!data?.is_live_today;
   const displayMode = data?.display_mode || "";
 
   const yizhi = col?.yizhi_items || [];
@@ -503,7 +500,6 @@ function AuctionBoardTab({
               stock={s}
               searching={searching}
               hit={searching && !!hitCodes?.has(s.code)}
-              isToday={!!isToday}
               onOpen={onOpenDetail}
             />
           )}
@@ -663,7 +659,7 @@ function AuctionPrevTab({
         {data?.phase === "auction" ? (
           <Tag color="red">竞价中</Tag>
         ) : (
-          <Tag>竞价涨幅=开盘价涨幅</Tag>
+          <Tag>已冻结 9:25 竞价结果</Tag>
         )}
       </div>
 

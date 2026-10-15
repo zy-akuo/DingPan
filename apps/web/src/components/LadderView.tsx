@@ -317,7 +317,7 @@ export function LadderView({
                       : " ladder-stock-fail";
                 return (
                   <div
-                    key={`${g.key}-${s.code}-${s.status}`}
+                    key={`${g.key}-${s.code}`}
                     className={`ladder-stock${statusTone}${s.risk_tags?.length ? " has-risk" : ""}${hit ? " ladder-stock-hit" : ""}${searching && !hit ? " ladder-stock-dim" : ""}`}
                   >
                     <div className="ladder-stock-main">
