@@ -356,6 +356,18 @@ async def put_fields(fields: FieldConfig):
     except Exception:
         fields.alert_speech_interval_sec = 1.0
     try:
+        fields.alert_range_window_sec = max(
+            15.0, min(600.0, float(fields.alert_range_window_sec or 60.0))
+        )
+    except Exception:
+        fields.alert_range_window_sec = 60.0
+    try:
+        fields.alert_range_pct = max(
+            0.5, min(20.0, float(fields.alert_range_pct or 3.0))
+        )
+    except Exception:
+        fields.alert_range_pct = 3.0
+    try:
         fields.auction_poll_interval_sec = max(
             1.0, min(5.0, float(fields.auction_poll_interval_sec or 1.0))
         )
@@ -391,6 +403,22 @@ async def put_watchlist(body: WatchlistBody):
         "codes": list(cfg.watchlist or []),
         "pinned": list(cfg.watchlist_pinned or []),
     }
+
+
+@app.post("/api/alerts/refresh")
+async def alerts_refresh():
+    """手动刷新异动播报：拉取监控列表最新行情并检测异动。"""
+    try:
+        return await market_service.force_refresh_alerts()
+    except Exception as e:
+        return {
+            "ok": False,
+            "count": 0,
+            "events": [],
+            "feed": [],
+            "error": str(e),
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
 
 
 @app.get("/api/alertlist")

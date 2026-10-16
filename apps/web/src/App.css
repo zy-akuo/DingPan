@@ -1346,7 +1346,7 @@ body {
   background: color-mix(in srgb, var(--accent) 8%, transparent);
 }
 
-/* 全局藏滚动条后：仅表格恢复细横条，便于查看右侧列 */
+/* 表格：隐藏滚动条，纵向滚轮 / 横向拖动 */
 .monitor-table-wrap .ant-table-body,
 .monitor-table-wrap .ant-table-content,
 .alert-stocks-table .ant-table-body,
@@ -1354,38 +1354,27 @@ body {
 .alert-feed-table .ant-table-body,
 .alert-feed-table .ant-table-content {
   overflow-x: auto !important;
-  scrollbar-width: thin; /* Firefox */
-  scrollbar-color: color-mix(in srgb, var(--muted) 55%, transparent) transparent;
+  cursor: grab;
+  touch-action: pan-y;
 }
 
-.monitor-table-wrap .ant-table-body::-webkit-scrollbar,
-.monitor-table-wrap .ant-table-content::-webkit-scrollbar,
-.alert-stocks-table .ant-table-body::-webkit-scrollbar,
-.alert-stocks-table .ant-table-content::-webkit-scrollbar,
-.alert-feed-table .ant-table-body::-webkit-scrollbar,
-.alert-feed-table .ant-table-content::-webkit-scrollbar {
-  display: block !important;
-  width: 0 !important; /* 竖向仍隐藏 */
-  height: 8px !important;
+.monitor-table-wrap.is-table-dragging,
+.alert-table-drag.is-table-dragging {
+  cursor: grabbing;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
-.monitor-table-wrap .ant-table-body::-webkit-scrollbar-thumb,
-.monitor-table-wrap .ant-table-content::-webkit-scrollbar-thumb,
-.alert-stocks-table .ant-table-body::-webkit-scrollbar-thumb,
-.alert-stocks-table .ant-table-content::-webkit-scrollbar-thumb,
-.alert-feed-table .ant-table-body::-webkit-scrollbar-thumb,
-.alert-feed-table .ant-table-content::-webkit-scrollbar-thumb {
-  background: color-mix(in srgb, var(--muted) 55%, transparent);
-  border-radius: 4px;
+.monitor-table-wrap.is-table-dragging .ant-table-body,
+.monitor-table-wrap.is-table-dragging .ant-table-content,
+.alert-table-drag.is-table-dragging .ant-table-body,
+.alert-table-drag.is-table-dragging .ant-table-content {
+  cursor: grabbing;
 }
 
-.monitor-table-wrap .ant-table-body::-webkit-scrollbar-track,
-.monitor-table-wrap .ant-table-content::-webkit-scrollbar-track,
-.alert-stocks-table .ant-table-body::-webkit-scrollbar-track,
-.alert-stocks-table .ant-table-content::-webkit-scrollbar-track,
-.alert-feed-table .ant-table-body::-webkit-scrollbar-track,
-.alert-feed-table .ant-table-content::-webkit-scrollbar-track {
-  background: transparent;
+.monitor-table-wrap.is-table-dragging .ant-table-tbody > tr,
+.alert-table-drag.is-table-dragging .ant-table-tbody > tr {
+  pointer-events: none;
 }
 
 .watch-actions {

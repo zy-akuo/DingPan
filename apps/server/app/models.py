@@ -89,7 +89,7 @@ class SpeechEvent(BaseModel):
 
 
 class AlertEvent(BaseModel):
-    """异动播报事件（冲击涨停 / 封死涨停 / 封涨大减 / 涨停打开 / 涨停被砸）。"""
+    """异动播报事件（冲击涨停 / 封死涨停 / 封涨大减 / 急涨急跌 / 涨停打开 / 涨停被砸）。"""
 
     type: str
     code: str
@@ -122,6 +122,7 @@ DEFAULT_ALERT_SPEECH_TYPES: list[str] = [
     "seal_firm",
     "seal_drop",
     "seal_rise",
+    "range_move",
     "zt_open",
     "zt_smash",
 ]
@@ -173,6 +174,9 @@ class FieldConfig(BaseModel):
         default_factory=lambda: list(DEFAULT_ALERT_SPEECH_TYPES)
     )
     alert_speech_interval_sec: float = 1.0
+    # 时间窗口涨跌幅提醒：默认 60 秒内涨跌幅超过 3%
+    alert_range_window_sec: float = 60.0
+    alert_range_pct: float = 3.0
 
 
 AVAILABLE_FIELDS: dict[str, str] = {

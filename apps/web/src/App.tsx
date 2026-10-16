@@ -64,6 +64,8 @@ const defaultFields: FieldConfig = {
   alert_speech_enabled: true,
   alert_speech_types: [...DEFAULT_ALERT_SPEECH_TYPES],
   alert_speech_interval_sec: 1,
+  alert_range_window_sec: 60,
+  alert_range_pct: 3,
 };
 
 type MainTab =
@@ -198,13 +200,18 @@ export default function App() {
       .then((data: { config: UserConfig; available_fields: Record<string, string> }) => {
         if (data.config?.fields) {
           const merged = { ...defaultFields, ...data.config.fields };
-          // 升级：旧配置缺「封涨大增」时，若原先几乎全开则自动补上
+          // 升级：旧配置缺「封涨大增 / 急涨急跌」时自动补上
           const types = [...(merged.alert_speech_types || [])];
           if (!types.includes("seal_rise") && types.includes("seal_drop")) {
             const idx = types.indexOf("seal_drop");
             types.splice(idx + 1, 0, "seal_rise");
-            merged.alert_speech_types = types;
           }
+          if (!types.includes("range_move")) {
+            const idx = types.indexOf("seal_rise");
+            if (idx >= 0) types.splice(idx + 1, 0, "range_move");
+            else types.push("range_move");
+          }
+          merged.alert_speech_types = types;
           setFields(merged);
         }
         if (data.available_fields) setAvailable(data.available_fields);

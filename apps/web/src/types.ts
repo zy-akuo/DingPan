@@ -161,6 +161,7 @@ export const DEFAULT_ALERT_SPEECH_TYPES = [
   "seal_firm",
   "seal_drop",
   "seal_rise",
+  "range_move",
   "zt_open",
   "zt_smash",
 ] as const;
@@ -186,6 +187,10 @@ export interface FieldConfig {
   alert_speech_types?: string[];
   /** 异动播报轮询间隔（秒） */
   alert_speech_interval_sec?: number;
+  /** 时间窗口涨跌幅提醒：窗口秒数，默认 60 */
+  alert_range_window_sec?: number;
+  /** 时间窗口涨跌幅提醒：阈值%，默认 3 */
+  alert_range_pct?: number;
 }
 
 export interface UserConfig {
@@ -202,6 +207,7 @@ export const ALERT_TYPE_LABELS: Record<string, string> = {
   seal_firm: "封死涨停",
   seal_drop: "封涨大减",
   seal_rise: "封涨大增",
+  range_move: "急涨急跌",
   zt_open: "涨停打开",
   zt_smash: "涨停被砸",
 };

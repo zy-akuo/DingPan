@@ -3,13 +3,32 @@ import {
   LineChartOutlined,
   PushpinFilled,
   PushpinOutlined,
+  ReloadOutlined,
 } from "@ant-design/icons";
 import { AutoComplete, Button, Space, Switch, Table, Tag, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
+import { useTableDragScroll } from "../hooks/useTableDragScroll";
 import { loadAlertlist, saveAlertlist } from "../lib/watchlist";
 import type { AlertEvent, FieldConfig, StockItem } from "../types";
 import { ALERT_TYPE_LABELS, formatPct } from "../types";
+
+function AlertTableDrag({ children }: { children: ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useTableDragScroll(ref);
+  return (
+    <div ref={ref} className="alert-table-drag">
+      {children}
+    </div>
+  );
+}
 
 type Suggest = { code: string; name: string; market: string };
 
@@ -18,6 +37,7 @@ const TYPE_COLOR: Record<string, string> = {
   seal_firm: "var(--up)",
   seal_drop: "var(--down)",
   seal_rise: "var(--up)",
+  range_move: "var(--accent, #f59e0b)",
   zt_open: "var(--broken)",
   zt_smash: "var(--down)",
 };
@@ -75,6 +95,7 @@ export function AlertBroadcastPanel({
   const [rows, setRows] = useState<StockItem[]>([]);
   const [addKw, setAddKw] = useState("");
   const [options, setOptions] = useState<{ value: string; label: string; item: Suggest }[]>([]);
+  const [refreshing, setRefreshing] = useState(false);
   const searchTimer = useRef<number | null>(null);
   const pollTimer = useRef<number | null>(null);
   const cacheRef = useRef<Map<string, StockItem>>(new Map());
@@ -131,6 +152,39 @@ export function AlertBroadcastPanel({
       if (pollTimer.current) window.clearInterval(pollTimer.current);
     };
   }, [codes, ready, refreshQuotes, fields.alert_speech_interval_sec]);
+
+  const onManualRefresh = useCallback(async () => {
+    if (!codes.length) {
+      message.info("请先添加监控股票");
+      return;
+    }
+    setRefreshing(true);
+    try {
+      const [res] = await Promise.all([
+        fetch("/api/alerts/refresh", { method: "POST" }),
+        refreshQuotes(codes),
+      ]);
+      if (!res.ok) throw new Error(`刷新失败: ${res.status}`);
+      const data = (await res.json()) as {
+        ok?: boolean;
+        count?: number;
+        error?: string;
+      };
+      if (data.error && data.ok === false) {
+        throw new Error(data.error);
+      }
+      const n = data.count ?? 0;
+      if (n > 0) {
+        message.success(`已刷新，发现 ${n} 条新异动`);
+      } else {
+        message.success("已刷新监控行情，暂无新异动");
+      }
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : "刷新失败");
+    } finally {
+      setRefreshing(false);
+    }
+  }, [codes, refreshQuotes]);
 
   const persist = useCallback(async (nextCodes: string[], nextPinned: string[]) => {
     setCodes(nextCodes);
@@ -346,6 +400,15 @@ export function AlertBroadcastPanel({
             />
             <span className="muted">语音</span>
             <Switch checked={speechOn} onChange={onToggleSpeech} />
+            <Button
+              size="small"
+              icon={<ReloadOutlined />}
+              loading={refreshing}
+              disabled={!ready}
+              onClick={() => void onManualRefresh()}
+            >
+              刷新
+            </Button>
             <Button size="small" onClick={onOpenSettings}>
               设置
             </Button>
@@ -356,41 +419,45 @@ export function AlertBroadcastPanel({
       <div className="alert-body">
         <div className="alert-stocks">
           <div className="alert-subhead">监控列表</div>
-          <Table
-            className="alert-stocks-table"
-            size="small"
-            rowKey="code"
-            pagination={false}
-            dataSource={rows}
-            columns={stockCols}
-            scroll={{ y: "calc(100vh - 300px)", x: 360 }}
-            locale={{ emptyText: "请添加要监控的股票" }}
-            rowClassName={(r) =>
-              [
-                pinSet.has(r.code) ? "monitor-row-pinned" : "",
-                r.code === selectedCode ? "monitor-row-selected" : "",
-                "alert-stock-row",
-              ]
-                .filter(Boolean)
-                .join(" ")
-            }
-            onRow={(record) => ({
-              onClick: () => onRowClick(record),
-            })}
-          />
+          <AlertTableDrag>
+            <Table
+              className="alert-stocks-table"
+              size="small"
+              rowKey="code"
+              pagination={false}
+              dataSource={rows}
+              columns={stockCols}
+              scroll={{ y: "calc(100vh - 300px)", x: 360 }}
+              locale={{ emptyText: "请添加要监控的股票" }}
+              rowClassName={(r) =>
+                [
+                  pinSet.has(r.code) ? "monitor-row-pinned" : "",
+                  r.code === selectedCode ? "monitor-row-selected" : "",
+                  "alert-stock-row",
+                ]
+                  .filter(Boolean)
+                  .join(" ")
+              }
+              onRow={(record) => ({
+                onClick: () => onRowClick(record),
+              })}
+            />
+          </AlertTableDrag>
         </div>
         <div className="alert-feed">
           <div className="alert-subhead">事件流水</div>
-          <Table
-            className="alert-feed-table"
-            size="small"
-            rowKey={(r, i) => `${r.type}-${r.code}-${r.time}-${r.detail}-${i}`}
-            pagination={false}
-            dataSource={sortedFeed}
-            columns={eventCols}
-            scroll={{ y: "calc(100vh - 300px)", x: 760 }}
-            locale={{ emptyText: codes.length ? "等待异动…" : "添加股票后开始监控" }}
-          />
+          <AlertTableDrag>
+            <Table
+              className="alert-feed-table"
+              size="small"
+              rowKey={(r, i) => `${r.type}-${r.code}-${r.time}-${r.detail}-${i}`}
+              pagination={false}
+              dataSource={sortedFeed}
+              columns={eventCols}
+              scroll={{ y: "calc(100vh - 300px)", x: 760 }}
+              locale={{ emptyText: codes.length ? "等待异动…" : "添加股票后开始监控" }}
+            />
+          </AlertTableDrag>
         </div>
       </div>
     </div>

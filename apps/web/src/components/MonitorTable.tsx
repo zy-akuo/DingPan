@@ -8,6 +8,7 @@ import {
   useRef,
   type ReactNode,
 } from "react";
+import { useTableDragScroll } from "../hooks/useTableDragScroll";
 import type { StockItem } from "../types";
 import { formatMoney, formatPct, formatVolume } from "../types";
 import { RiskBadge } from "./RiskPanel";
@@ -240,6 +241,7 @@ export function MonitorTable({
   }, [cols]);
   const wrapRef = useRef<HTMLDivElement>(null);
   const scrollTopRef = useRef(0);
+  useTableDragScroll(wrapRef);
 
   useEffect(() => {
     if (!preserveScroll) return;

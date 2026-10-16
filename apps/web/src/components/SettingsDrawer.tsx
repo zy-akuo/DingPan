@@ -29,6 +29,8 @@ export function SettingsDrawer({
   const alertSec = draft.alert_speech_interval_sec ?? 1;
   const alertTypes = draft.alert_speech_types ?? [...DEFAULT_ALERT_SPEECH_TYPES];
   const alertEnabled = draft.alert_speech_enabled !== false;
+  const rangeWindowSec = draft.alert_range_window_sec ?? 60;
+  const rangePct = draft.alert_range_pct ?? 3;
 
   return (
     <Drawer
@@ -67,6 +69,14 @@ export function SettingsDrawer({
                   alert_speech_interval_sec: Math.max(
                     0.5,
                     Math.min(5, Number(draft.alert_speech_interval_sec) || 1),
+                  ),
+                  alert_range_window_sec: Math.max(
+                    15,
+                    Math.min(600, Number(draft.alert_range_window_sec) || 60),
+                  ),
+                  alert_range_pct: Math.max(
+                    0.5,
+                    Math.min(20, Number(draft.alert_range_pct) || 3),
                   ),
                   alert_speech_types:
                     draft.alert_speech_types ?? [...DEFAULT_ALERT_SPEECH_TYPES],
@@ -217,8 +227,41 @@ export function SettingsDrawer({
               style={{ width: 140 }}
             />
           </Space>
+          <Space align="center" wrap>
+            <span>急涨急跌窗口</span>
+            <InputNumber
+              min={15}
+              max={600}
+              step={15}
+              value={rangeWindowSec}
+              onChange={(v) =>
+                setDraft({
+                  ...draft,
+                  alert_range_window_sec: typeof v === "number" ? v : 60,
+                })
+              }
+              addonAfter="秒"
+              style={{ width: 140 }}
+            />
+            <span>阈值</span>
+            <InputNumber
+              min={0.5}
+              max={20}
+              step={0.5}
+              value={rangePct}
+              onChange={(v) =>
+                setDraft({
+                  ...draft,
+                  alert_range_pct: typeof v === "number" ? v : 3,
+                })
+              }
+              addonAfter="%"
+              style={{ width: 120 }}
+            />
+          </Space>
           <div style={{ color: "var(--muted)", fontSize: 12, lineHeight: 1.5 }}>
-            仅监控「异动播报」栏中的股票。默认全部类型开启，间隔 1 秒。音色与普通播报区分。
+            仅监控「异动播报」栏中的股票。封涨大减/大增：相对基线每变动≥10%播报一次。冲击涨停：距涨停≤1个点且上冲时提醒。急涨急跌默认
+            60 秒内涨跌幅≥3%。
           </div>
           <div>
             <div style={{ marginBottom: 8, color: "var(--muted)", fontSize: 13 }}>异动类型</div>
@@ -228,6 +271,7 @@ export function SettingsDrawer({
                 { label: "封死涨停", value: "seal_firm" },
                 { label: "封涨大减", value: "seal_drop" },
                 { label: "封涨大增", value: "seal_rise" },
+                { label: "急涨急跌", value: "range_move" },
                 { label: "涨停打开", value: "zt_open" },
                 { label: "涨停被砸", value: "zt_smash" },
               ]}

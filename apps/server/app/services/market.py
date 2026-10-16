@@ -42,12 +42,11 @@ from ..models import (
 
 # 异动播报阈值
 _ALERT_MIN_SEAL = 5e5  # 有效封单下限（元）
-_ALERT_SEAL_DROP_RATIO = 0.30
-_ALERT_SEAL_DROP_ABS = 3e6  # 绝对减少下限
-_ALERT_SEAL_RISE_RATIO = 0.30
-_ALERT_SEAL_RISE_ABS = 3e6  # 绝对增加下限
+_ALERT_SEAL_CHANGE_RATIO = 0.10  # 封涨大减/大增：相对基线变动 ≥ 10% 播报一次
 _ALERT_SMASH_SEAL = 3e7  # 开板前封单较大视为被砸
 _ALERT_SMASH_AMOUNT_JUMP = 2e7  # 开板瞬间成交额跃升
+_ALERT_IMPACT_DIST_PP = 1.0  # 冲击涨停：距涨停价 ≤ 1 个百分点
+_ALERT_IMPACT_RESET_PP = 2.0  # 回撤超过该距离后允许再次冲击提醒
 _ALERT_FEED_MAX = 400
 _PRICE_EPS = 0.015
 
@@ -1446,16 +1445,27 @@ class MarketService:
         self,
         quotes: dict[str, dict[str, Any]],
         pinned: set[str],
+        *,
+        range_window_sec: float = 60.0,
+        range_pct: float = 3.0,
     ) -> list[AlertEvent]:
-        now_t = datetime.now().strftime("%H:%M:%S")
+        now = datetime.now()
+        now_t = now.strftime("%H:%M:%S")
+        now_ts = now.timestamp()
+        window_sec = max(15.0, min(600.0, float(range_window_sec or 60.0)))
+        move_pct = max(0.5, min(20.0, float(range_pct or 3.0)))
         events: list[AlertEvent] = []
 
         for code, q in quotes.items():
             price = float(q.get("price") or 0)
+            if price <= 0:
+                continue
             limit_up = float(q.get("limit_up") or 0)
             buy1 = float(q.get("buy1") or 0)
             seal = float(q.get("seal_amount") or 0)
             amount = float(q.get("amount") or 0)
+            change_pct = float(q.get("change_pct") or 0)
+            prev_close = float(q.get("prev_close") or 0)
             name = str(q.get("name") or "")
             board_count, industry, pool_name = self._alert_meta_for(code)
             if pool_name:
@@ -1472,14 +1482,20 @@ class MarketService:
                 if hit_seal:
                     break
 
-            if limit_up <= 0 or price <= 0:
-                continue
+            if prev_close <= 0 and limit_up > 0:
+                # 粗略回推昨收，便于计算距涨停点数
+                if abs(change_pct) > 1e-9:
+                    prev_close = price / (1.0 + change_pct / 100.0)
+                else:
+                    prev_close = limit_up / 1.1
 
-            at_limit = price + _PRICE_EPS >= limit_up
-            buy_at_limit = buy1 + _PRICE_EPS >= limit_up
+            at_limit = limit_up > 0 and price + _PRICE_EPS >= limit_up
+            buy_at_limit = limit_up > 0 and buy1 + _PRICE_EPS >= limit_up
             # 价在涨停且封单有效即可；买一偶发为 0 时仍用封单额判定，避免封/开抖动
-            raw_sealed = at_limit and seal >= _ALERT_MIN_SEAL and (
-                buy_at_limit or seal >= _ALERT_MIN_SEAL * 2
+            raw_sealed = bool(
+                at_limit
+                and seal >= _ALERT_MIN_SEAL
+                and (buy_at_limit or seal >= _ALERT_MIN_SEAL * 2)
             )
 
             st = self._alert_state.get(code) or {
@@ -1489,17 +1505,25 @@ class MarketService:
                 "seal_trough": 0.0,
                 "seal": 0.0,
                 "amount": 0.0,
+                "price": 0.0,
                 "seal_confirm": 0,
                 "open_confirm": 0,
+                "pct_hist": [],
             }
             prev_sealed = bool(st.get("sealed"))
             prev_seal = float(st.get("seal") or 0)
             prev_amount = float(st.get("amount") or 0)
+            prev_price = float(st.get("price") or 0)
             peak = float(st.get("seal_peak") or 0)
             trough = float(st.get("seal_trough") or 0)
             touched = bool(st.get("touched"))
             seal_confirm = int(st.get("seal_confirm") or 0)
             open_confirm = int(st.get("open_confirm") or 0)
+            pct_hist: list[tuple[float, float]] = [
+                (float(t), float(p))
+                for t, p in (st.get("pct_hist") or [])
+                if isinstance(t, (int, float)) and isinstance(p, (int, float))
+            ]
 
             # 连续 2 拍确认再切换封板状态，抑制盘口抖动轮播
             if raw_sealed:
@@ -1524,16 +1548,71 @@ class MarketService:
                 "industry": industry,
             }
 
-            if at_limit and not sealed and not touched and not raw_sealed:
+            # —— 时间窗口涨跌幅 —— #
+            pct_hist.append((now_ts, change_pct))
+            pct_hist = [(t, p) for t, p in pct_hist if now_ts - t <= window_sec + 1.0]
+            if len(pct_hist) >= 2:
+                base_ts, base_pct = pct_hist[0]
+                delta = change_pct - base_pct
+                if abs(delta) >= move_pct - 1e-9:
+                    elapsed = max(1, int(round(now_ts - base_ts)))
+                    if elapsed >= 60 and elapsed % 60 == 0:
+                        win_label = f"{elapsed // 60}分钟"
+                    elif elapsed >= 60:
+                        win_label = f"{elapsed // 60}分{elapsed % 60}秒"
+                    else:
+                        win_label = f"{elapsed}秒"
+                    direction = "急涨" if delta >= 0 else "急跌"
+                    sign = "+" if delta >= 0 else ""
+                    start_t = datetime.fromtimestamp(base_ts).strftime("%H:%M:%S")
+                    events.append(
+                        AlertEvent(
+                            type="range_move",
+                            text=f"{name or code}{direction}{abs(delta):.2f}%",
+                            detail=f"{start_t}起{win_label}内{sign}{delta:.2f}%",
+                            **common,
+                        )
+                    )
+                    # 触发后重置基线，避免同一波段连续刷屏
+                    pct_hist = [(now_ts, change_pct)]
+
+            # —— 冲击涨停：仅封板前逼近捕捉 —— #
+            # 已触及涨停 / 已有有效封单 / 已封死：不再报冲击（避免与封死涨停连发）
+            dist_pp = 999.0
+            if limit_up > 0 and prev_close > 0:
+                dist_pp = max(0.0, (limit_up - price) / prev_close * 100.0)
+            already_sealing = sealed or raw_sealed or (at_limit and seal >= _ALERT_MIN_SEAL)
+            if already_sealing:
+                touched = True
+            rising = prev_price <= 0 or price + _PRICE_EPS >= prev_price
+            buy_pressure = buy_at_limit or (
+                limit_up > 0
+                and buy1 > 0
+                and prev_close > 0
+                and (limit_up - buy1) / prev_close * 100.0 <= _ALERT_IMPACT_DIST_PP + 0.5
+            )
+            # 必须尚未触及涨停：距涨停 (0, 1] 个点内上冲才报
+            pre_limit = (
+                limit_up > 0
+                and not at_limit
+                and 0 < dist_pp <= _ALERT_IMPACT_DIST_PP
+            )
+            if pre_limit and not already_sealing and not touched and rising and buy_pressure:
                 events.append(
                     AlertEvent(
                         type="impact_zt",
                         text=f"{name or code}冲击涨停",
-                        detail=f"成交额{_fmt_money(amount)}" if amount > 0 else "",
+                        detail=(
+                            f"距涨停{dist_pp:.2f}个点 涨幅{change_pct:.2f}%"
+                            + (f" 成交额{_fmt_money(amount)}" if amount > 0 else "")
+                        ).strip(),
                         **common,
                     )
                 )
                 touched = True
+            # 回撤拉开距离后允许再次冲击提醒（二次上板）
+            if not sealed and not raw_sealed and dist_pp > _ALERT_IMPACT_RESET_PP:
+                touched = False
 
             if sealed and not prev_sealed:
                 events.append(
@@ -1549,28 +1628,25 @@ class MarketService:
                 touched = True
 
             if sealed and prev_sealed and seal > 0:
-                # 峰值/谷值单向更新，避免小幅波动反复触发大增/大减
+                # peak=大减基线（跟涨），trough=大增基线（跟跌）；触发后重置为当前封单可连续提醒
                 if seal >= peak:
                     peak = seal
                 if trough <= 0 or seal <= trough:
                     trough = seal
 
-                dropped = (
-                    peak > 0
-                    and seal <= peak * (1.0 - _ALERT_SEAL_DROP_RATIO)
-                    and (peak - seal) >= _ALERT_SEAL_DROP_ABS
-                )
-                risen = (
-                    trough > 0
-                    and seal >= trough * (1.0 + _ALERT_SEAL_RISE_RATIO)
-                    and (seal - trough) >= _ALERT_SEAL_RISE_ABS
-                )
+                drop_ratio = ((peak - seal) / peak) if peak >= _ALERT_MIN_SEAL else 0.0
+                rise_ratio = ((seal - trough) / trough) if trough >= _ALERT_MIN_SEAL else 0.0
+                dropped = peak >= _ALERT_MIN_SEAL and drop_ratio >= _ALERT_SEAL_CHANGE_RATIO
+                risen = trough >= _ALERT_MIN_SEAL and rise_ratio >= _ALERT_SEAL_CHANGE_RATIO
                 if dropped and not risen:
                     events.append(
                         AlertEvent(
                             type="seal_drop",
                             text=f"{name or code}封涨大减",
-                            detail=f"剩余封单{_fmt_money(seal)}",
+                            detail=(
+                                f"剩余封单{_fmt_money(seal)}"
+                                f"（较基线减{drop_ratio * 100:.1f}%）"
+                            ),
                             **common,
                         )
                     )
@@ -1581,7 +1657,10 @@ class MarketService:
                         AlertEvent(
                             type="seal_rise",
                             text=f"{name or code}封涨大增",
-                            detail=f"涨停封单{_fmt_money(seal)}",
+                            detail=(
+                                f"涨停封单{_fmt_money(seal)}"
+                                f"（较基线增{rise_ratio * 100:.1f}%）"
+                            ),
                             **common,
                         )
                     )
@@ -1611,17 +1690,21 @@ class MarketService:
                     )
                 peak = 0.0
                 trough = 0.0
+                # 开板后允许再次捕捉冲击
+                touched = False
 
             self._alert_state[code] = {
                 "sealed": sealed,
-                "touched": touched or at_limit,
+                "touched": touched,
                 "seal_peak": peak,
                 "seal_trough": trough,
                 "seal": seal,
                 "amount": amount,
+                "price": price,
                 "name": name,
                 "seal_confirm": seal_confirm,
                 "open_confirm": open_confirm,
+                "pct_hist": pct_hist,
             }
 
         # 置顶股事件优先
@@ -1656,7 +1739,21 @@ class MarketService:
             if pool_name and not q.get("name"):
                 q["name"] = pool_name
 
-        new_events = self._diff_alert_events(quotes, pinned)
+        try:
+            range_window_sec = float(getattr(cfg.fields, "alert_range_window_sec", None) or 60.0)
+        except Exception:
+            range_window_sec = 60.0
+        try:
+            range_pct = float(getattr(cfg.fields, "alert_range_pct", None) or 3.0)
+        except Exception:
+            range_pct = 3.0
+
+        new_events = self._diff_alert_events(
+            quotes,
+            pinned,
+            range_window_sec=range_window_sec,
+            range_pct=range_pct,
+        )
         if not new_events:
             return []
 
@@ -1676,6 +1773,17 @@ class MarketService:
         # 推送后清空本轮标记，避免行情广播重复播报
         self.snapshot.alert_events = []
         return new_events
+
+    async def force_refresh_alerts(self) -> dict[str, Any]:
+        """手动刷新：立即拉监控股行情并跑异动检测（不限交易时段）。"""
+        events = await self.refresh_alerts()
+        return {
+            "ok": True,
+            "count": len(events),
+            "events": [e.model_dump() for e in events],
+            "feed": [e.model_dump() for e in (self.snapshot.alert_feed or [])],
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
 
     async def alert_loop(self) -> None:
         from ..db import load_user_config
