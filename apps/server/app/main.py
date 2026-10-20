@@ -118,11 +118,14 @@ async def stock_search(q: str = "", limit: int = 12):
 
 
 @app.get("/api/market/speed")
-async def market_speed(limit: int = 50):
+async def market_speed(limit: int = 50, board: str = "main"):
+    """涨速榜：board=all|main|cyb|kcb|bj，默认主板前 50，已剔除涨停。"""
     limit = max(1, min(100, int(limit or 50)))
-    items = await market_service.get_speed_rank(limit=limit)
+    items = await market_service.get_speed_rank(limit=limit, board=board or "main")
     return {
         "items": [s.model_dump() for s in items],
+        "board": (board or "main").strip().lower() or "main",
+        "limit": limit,
         "updated_at": datetime.now().isoformat(timespec="seconds"),
     }
 

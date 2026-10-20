@@ -237,10 +237,11 @@ class MarketService:
         self._auction_board_cache: tuple[float, dict[str, Any]] | None = None
         self._auction_prev_cache: tuple[float, dict[str, Any]] | None = None
         self._auction_region_cache: dict[str, str] = {}
-        # 涨速榜短缓存 + 单飞，高轮询下稳定且不打爆东财
-        self._speed_cache: tuple[float, int, list[StockItem]] | None = None
+        # 涨速榜短缓存 + 单飞，高轮询下稳定且不打爆东财；(ts, limit, board, items)
+        self._speed_cache: tuple[float, int, str, list[StockItem]] | None = None
         self._speed_lock = asyncio.Lock()
         self._speed_inflight: asyncio.Task[list[StockItem]] | None = None
+        self._speed_inflight_key: str = ""
         # 观察列表批量行情短缓存 + 单飞
         self._batch_quote_cache: dict[str, tuple[float, list[StockItem]]] = {}
         self._batch_quote_lock = asyncio.Lock()
@@ -646,9 +647,15 @@ class MarketService:
             "map": {c: {"risk_tags": v.get("risk_tags"), "risk_hint": v.get("risk_hint")} for c, v in self._risk_map.items()},
         }
 
-    async def get_speed_rank(self, limit: int = 50) -> list[StockItem]:
-        """涨速榜：短 TTL 缓存 + 单飞；空结果不覆盖上次成功数据。"""
+    async def get_speed_rank(
+        self, limit: int = 50, board: str = "main"
+    ) -> list[StockItem]:
+        """涨速榜：按板块短 TTL 缓存 + 单飞；空结果不覆盖上次成功数据。"""
+        from ..collectors.eastmoney import normalize_board_bucket
+
         limit = max(1, min(100, int(limit or 50)))
+        board = normalize_board_bucket(board)
+        cache_key = f"{board}:{limit}"
         now = datetime.now().timestamp()
         # 略短于常见 1～1.5s 轮询，保证连续两轮能吃到新数据
         ttl = 0.45
@@ -657,10 +664,11 @@ class MarketService:
         if (
             cached
             and cached[1] == limit
-            and cached[2]
+            and cached[2] == board
+            and cached[3]
             and (now - cached[0]) < ttl
         ):
-            return list(cached[2])
+            return list(cached[3])
 
         async with self._speed_lock:
             now = datetime.now().timestamp()
@@ -668,14 +676,31 @@ class MarketService:
             if (
                 cached
                 and cached[1] == limit
-                and cached[2]
+                and cached[2] == board
+                and cached[3]
                 and (now - cached[0]) < ttl
             ):
-                return list(cached[2])
+                return list(cached[3])
             task = self._speed_inflight
-            if task is None or task.done():
+            if (
+                task is None
+                or task.done()
+                or self._speed_inflight_key != cache_key
+            ):
                 async def _load() -> list[StockItem]:
-                    rows = await self.client.fetch_speed_rank(limit=limit)
+                    rows = await self.client.fetch_speed_rank(
+                        limit=limit, board=board, exclude_limit_up=True
+                    )
+                    # 再保险：丢弃非正涨速，并按涨速从大到小
+                    rows = sorted(
+                        (
+                            r
+                            for r in rows
+                            if float(r.get("speed") or 0) > 0
+                        ),
+                        key=lambda r: float(r.get("speed") or 0),
+                        reverse=True,
+                    )[:limit]
                     items: list[StockItem] = []
                     for r in rows:
                         s = self._to_stock(r, StockStatus.HOLDING)
@@ -686,28 +711,31 @@ class MarketService:
 
                 task = asyncio.create_task(_load())
                 self._speed_inflight = task
+                self._speed_inflight_key = cache_key
 
         try:
             items = await task
         except Exception:
-            if cached and cached[1] == limit and cached[2]:
-                return list(cached[2])
+            if cached and cached[1] == limit and cached[2] == board and cached[3]:
+                return list(cached[3])
             raise
         finally:
             if self._speed_inflight is task:
                 self._speed_inflight = None
+                self._speed_inflight_key = ""
 
         if items:
-            self._speed_cache = (datetime.now().timestamp(), limit, items)
+            self._speed_cache = (datetime.now().timestamp(), limit, board, items)
             return list(items)
         # 空包：若有未过期成功缓存则继续返回，避免前端闪空白
         if (
             cached
             and cached[1] == limit
-            and cached[2]
+            and cached[2] == board
+            and cached[3]
             and (datetime.now().timestamp() - cached[0]) < stale_ttl
         ):
-            return list(cached[2])
+            return list(cached[3])
         return []
 
     async def get_stocks_by_codes(self, codes: list[str]) -> list[StockItem]:
@@ -2296,10 +2324,12 @@ class MarketService:
         is_latest = actual_ds == latest_ds or actual_ds == today_yyyymmdd()
         ttl = self._history_cache_ttl(actual_ds, empty=not items, is_latest=is_latest)
 
-        # 请求日与实际日可能不同（周末点今天 → 回退到最近交易日），双侧写缓存
+        # 请求日与实际日可能不同（周末点今天 → 回退到最近交易日）；
+        # v3/v2 都写，供个股历史涨停与梯队共用同一份连板数
         await ttl_cache.set(cache_key, payload, ttl, kind="history_zt")
+        await ttl_cache.set(f"history_zt:kpl:v2:{actual_ds}", payload, ttl, kind="history_zt")
         if actual_ds != req_ds:
-            await ttl_cache.set(f"history_zt:kpl:v2:{actual_ds}", payload, ttl, kind="history_zt")
+            await ttl_cache.set(f"history_zt:kpl:v3:{actual_ds}", payload, ttl, kind="history_zt")
 
         if items:
             try:
@@ -2379,6 +2409,74 @@ class MarketService:
             prev = ds
             prev_board = boards[ds]
         return boards
+
+    @staticmethod
+    def _board_from_kpl_day_cache(hit: dict[str, Any], code: str) -> tuple[dict[str, Any] | None, int]:
+        """从开盘啦日缓存取个股行 + 连板数。
+
+        优先用 board_groups 分组（与连板梯队展示一致），再回退 items.board_count。
+        """
+        code = (code or "").zfill(6)
+        found: dict[str, Any] | None = None
+        for s in hit.get("items") or []:
+            if str(s.get("code") or "").zfill(6) == code:
+                found = s if isinstance(s, dict) else None
+                break
+        group_bc = 0
+        for g in hit.get("board_groups") or []:
+            if not isinstance(g, dict):
+                continue
+            for s in g.get("stocks") or []:
+                if str(s.get("code") or "").zfill(6) != code:
+                    continue
+                try:
+                    group_bc = max(1, int(g.get("board_count") or 0))
+                except (TypeError, ValueError):
+                    label = str(g.get("label") or "")
+                    if "首" in label:
+                        group_bc = 1
+                    else:
+                        import re
+
+                        m = re.search(r"(\d+)\s*连", label)
+                        group_bc = max(1, int(m.group(1))) if m else 0
+                if found is None and isinstance(s, dict):
+                    found = s
+                break
+            if group_bc:
+                break
+        item_bc = 0
+        if found is not None:
+            try:
+                item_bc = max(1, int(found.get("board_count") or 0))
+            except (TypeError, ValueError):
+                item_bc = 0
+        # 分组与条目不一致时取较大值（PidType 错位时常把高连板误标为首板）
+        bc = max(group_bc, item_bc)
+        return found, bc
+
+    @staticmethod
+    def _merge_board_counts(
+        streak: dict[str, int],
+        kpl_board: dict[str, int],
+        *,
+        kpl_authoritative: set[str] | None = None,
+    ) -> dict[str, int]:
+        """合并连板数。
+
+        - 权威开盘啦日（v3 梯队缓存）：完全以梯队板数为准（与连板梯队对齐）
+        - 旧缓存 / 非权威：可抬升推算，但不得用更低脏值把连续涨停压成首板
+        """
+        auth = kpl_authoritative or set()
+        out = {ds: max(1, int(bc or 1)) for ds, bc in streak.items()}
+        for ds, bc in kpl_board.items():
+            kpl_bc = max(1, int(bc or 1))
+            if ds not in out:
+                out[ds] = kpl_bc
+                continue
+            if ds in auth or kpl_bc >= out[ds]:
+                out[ds] = kpl_bc
+        return out
 
     @staticmethod
     def _kline_pct_map(bars: list[dict[str, Any]]) -> dict[str, float]:
@@ -2521,7 +2619,8 @@ class MarketService:
         else:
             return {"query": q, "matches": [], "stock": None, "items": [], "count": 0}
 
-        cache_key = f"history_stock_zt:v5:{code}"
+        # v6：与连板梯队（history_zt:kpl:v3）对齐板数；废弃会把 3连压成首板的旧缓存
+        cache_key = f"history_stock_zt:v6:{code}"
         cached = await ttl_cache.get(cache_key)
         if cached and isinstance(cached, dict) and cached.get("items") is not None:
             cached = {**cached, "query": q or cached.get("query") or ""}
@@ -2606,27 +2705,31 @@ class MarketService:
                 rejected.add(ds)
                 kline_confirmed.discard(ds)
 
-        # 开盘啦日缓存：仅做增强（原因/连板数），不因「池中未命中」剔除 K 线确认日
+        # 开盘啦日缓存（v3=梯队同源）：增强原因/连板数；不因未命中剔除 K 线确认日
         reason_map: dict[str, str] = {}
-        trusted_board: dict[str, int] = {}
+        kpl_board: dict[str, int] = {}
+        kpl_authoritative: set[str] = set()
         for ds in list(candidates | rejected):
-            hit = await ttl_cache.get(f"history_zt:kpl:v2:{ds}")
-            if not hit:
-                hit = await ttl_cache.get(f"history_zt:kpl:v1:{ds}")
-            if not isinstance(hit, dict) or int(hit.get("count") or 0) <= 0:
-                continue
-            found = None
-            for s in hit.get("items") or []:
-                if str(s.get("code") or "").zfill(6) == code:
-                    found = s
+            hit = None
+            hit_ver = ""
+            for ver in ("v3", "v2", "v1"):
+                cand = await ttl_cache.get(f"history_zt:kpl:{ver}:{ds}")
+                if isinstance(cand, dict) and int(cand.get("count") or 0) > 0:
+                    hit = cand
+                    hit_ver = ver
                     break
-            if found:
+            if not isinstance(hit, dict):
+                continue
+            found, bc = self._board_from_kpl_day_cache(hit, code)
+            if found is not None or bc > 0:
                 candidates.add(ds)
                 rejected.discard(ds)
-                if found.get("reason") or found.get("industry"):
+                if found and (found.get("reason") or found.get("industry")):
                     reason_map[ds] = str(found.get("reason") or found.get("industry") or "")
-                if found.get("board_count"):
-                    trusted_board[ds] = max(1, int(found.get("board_count") or 1))
+                if bc > 0:
+                    kpl_board[ds] = bc
+                    if hit_ver == "v3":
+                        kpl_authoritative.add(ds)
             elif ds not in kline_confirmed:
                 # 非 K 线确认且开盘啦当日池已加载却不在池中 → 剔除
                 candidates.discard(ds)
@@ -2639,7 +2742,7 @@ class MarketService:
             if not reason_map.get(ds) and (r.get("reason") or r.get("industry")):
                 reason_map[ds] = str(r.get("reason") or r.get("industry") or "")
 
-        # 同花顺：补原因/板型；K 线已确认的日期即使池中未命中也保留
+        # 同花顺：只补原因 / 确认是否在池；板数不采信（high_days 常把连板标成首板）
         pending = [ds for ds in sorted(candidates, reverse=True) if ds not in reason_map][:40]
         if pending and ths_client is not None:
             from ..collectors.ths import ThsClient
@@ -2647,7 +2750,7 @@ class MarketService:
             ths = ths_client if isinstance(ths_client, ThsClient) else ThsClient()
             sem = asyncio.Semaphore(4)
 
-            async def _probe_ths(ds: str) -> tuple[str, bool, str, int]:
+            async def _probe_ths(ds: str) -> tuple[str, bool, str]:
                 pool_key = f"ths_pool:{ds}"
                 hit = await ttl_cache.get(pool_key)
                 pool: list = hit if isinstance(hit, list) else []
@@ -2666,35 +2769,30 @@ class MarketService:
                     if str(row.get("code") or "").zfill(6) != code:
                         continue
                     reason = str(row.get("reason_type") or "").strip()
-                    board = _parse_board_count(0, row.get("high_days"))
-                    return ds, True, reason, board
+                    return ds, True, reason
                 # 池已确认不含该股：仅对非 K 线确认日剔除
                 if (fetched and pool) or (isinstance(hit, list) and hit):
-                    return ds, False, "", 0
-                return ds, True, "", 0
+                    return ds, False, ""
+                return ds, True, ""
 
             results = await asyncio.gather(*[_probe_ths(ds) for ds in pending])
-            for ds, keep, reason, board in results:
+            for ds, keep, reason in results:
                 if not keep and ds not in kline_confirmed:
                     candidates.discard(ds)
                     rejected.add(ds)
                     continue
                 if reason:
                     reason_map[ds] = reason
-                # 同花顺板数仅作参考：有开盘啦可信板数时不覆盖
-                if board > 0 and ds not in trusted_board:
-                    trusted_board[ds] = board
 
         dates_desc = sorted(candidates, reverse=True)
         streak = self._compute_board_streaks(
             list(reversed(dates_desc)),
             trade_days=trade_days or None,
         )
-        board_map: dict[str, int] = dict(streak)
-        # 开盘啦连板数优先于推算（例如点击日梯队是「首板」则列表也应是首板）
-        for ds, bc in trusted_board.items():
-            if ds in board_map:
-                board_map[ds] = max(1, int(bc))
+        # 与连板梯队对齐：v3 权威；旧缓存不得把 3连压成首板
+        board_map = self._merge_board_counts(
+            streak, kpl_board, kpl_authoritative=kpl_authoritative
+        )
 
         items: list[dict[str, Any]] = []
         for ds in dates_desc:

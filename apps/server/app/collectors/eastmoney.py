@@ -85,6 +85,68 @@ def _market_prefix(code: str, market_flag: int | None = None) -> str:
     return "深"
 
 
+# 东财 clist fs：按板块过滤，单次请求即得对应榜，避免拉全 A 再本地筛
+_FS_ALL_A = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048"
+_FS_BY_BOARD: dict[str, str] = {
+    "all": _FS_ALL_A,
+    "main": "m:1+t:2,m:0+t:6",  # 沪深主板（含原中小板）
+    "cyb": "m:0+t:80",  # 创业板
+    "kcb": "m:1+t:23",  # 科创板
+    "bj": "m:0+t:81+s:2048",  # 北交所
+}
+
+
+def normalize_board_bucket(board: str | None) -> str:
+    b = (board or "all").strip().lower()
+    if b in ("main", "cyb", "kcb", "bj", "all"):
+        return b
+    return "all"
+
+
+def board_bucket_of(code: str) -> str:
+    c = (code or "").zfill(6)
+    if c.startswith(("688", "689")):
+        return "kcb"
+    if c.startswith(("300", "301")):
+        return "cyb"
+    if c.startswith(("8", "4")) or c.startswith("92"):
+        return "bj"
+    return "main"
+
+
+def match_board_bucket(code: str, board: str | None) -> bool:
+    b = normalize_board_bucket(board)
+    if b == "all":
+        return True
+    return board_bucket_of(code) == b
+
+
+def _limit_up_threshold(code: str, name: str = "") -> float:
+    """涨停判定阈值（略低于理论板，兼容四舍五入）。"""
+    risk = classify_risk_type(name or "")
+    if risk in ("st", "delist"):
+        return 4.8
+    c = (code or "").zfill(6)
+    if c.startswith(("300", "301", "688", "689")):
+        return 19.8
+    if c.startswith(("8", "4")) or c.startswith("92"):
+        return 29.8
+    return 9.8
+
+
+def is_limit_up_row(
+    code: str,
+    name: str = "",
+    change_pct: float = 0.0,
+    price: float = 0.0,
+    limit_up: float = 0.0,
+) -> bool:
+    """是否已涨停（涨速榜需剔除）。"""
+    if limit_up > 0 and price > 0 and abs(price - limit_up) <= 0.015:
+        return True
+    return float(change_pct or 0) >= _limit_up_threshold(code, name) - 0.05
+
+
 def _price(raw: Any) -> float:
     try:
         v = float(raw)
@@ -2468,69 +2530,49 @@ class EastMoneyClient:
         )
         return out
 
-    async def fetch_speed_rank(self, limit: int = 50) -> list[dict[str, Any]]:
-        """A-share intraday speed ranking (东财涨速榜, fid=f22)。
-
-        clist 多节点重试；仍空时用涨幅榜+腾讯盘口估算涨速兜底，避免前端长时间空白。
-        """
-        limit = max(1, min(100, int(limit or 50)))
-        data: dict[str, Any] = {}
-        for base in (
-            "https://push2.eastmoney.com/api/qt/clist/get",
-            "https://82.push2.eastmoney.com/api/qt/clist/get",
-            "https://40.push2.eastmoney.com/api/qt/clist/get",
-            "https://push2delay.eastmoney.com/api/qt/clist/get",
-        ):
-            try:
-                data = await self._get(
-                    base,
-                    {
-                        "pn": "1",
-                        "pz": str(limit),
-                        "po": "1",
-                        "np": "1",
-                        "fltt": "2",
-                        "invt": "2",
-                        "fid": "f22",
-                        "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048",
-                        "fields": "f12,f13,f14,f2,f3,f5,f6,f8,f20,f21,f22,f100",
-                        "ut": "bd1d9ddb04089700cf9c27f6f7426281",
-                    },
-                    referer="https://quote.eastmoney.com/center/gridlist.html#hs_a_board",
-                )
-                if (data.get("data") or {}).get("diff") is not None:
-                    break
-            except Exception:
-                continue
-
-        diff = (data.get("data") or {}).get("diff") or []
-        if isinstance(diff, dict):
-            rows = [v for v in diff.values() if isinstance(v, dict)]
-        elif isinstance(diff, list):
-            rows = [v for v in diff if isinstance(v, dict)]
-        else:
-            rows = []
-
+    def _parse_speed_clist_rows(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        board: str,
+        exclude_limit_up: bool,
+        min_speed: float = 0.01,
+    ) -> list[dict[str, Any]]:
+        """解析涨速榜行：只要涨速>0，按涨速降序（接口顺序不可信）。"""
         out: list[dict[str, Any]] = []
         for r in rows:
             code = str(r.get("f12") or "").zfill(6)
             if not code.isdigit():
+                continue
+            if not match_board_bucket(code, board):
                 continue
             try:
                 mkt_flag = int(r.get("f13")) if r.get("f13") is not None else None
             except (TypeError, ValueError):
                 mkt_flag = None
             industry = str(r.get("f100") or "")
-            # f5 成交量：手 → 股
+            name = str(r.get("f14") or code)
+            price = float(r.get("f2") or 0) if r.get("f2") not in ("-", None) else 0.0
+            change_pct = (
+                float(r.get("f3") or 0) if r.get("f3") not in ("-", None) else 0.0
+            )
+            speed = (
+                float(r.get("f22") or 0) if r.get("f22") not in ("-", None) else 0.0
+            )
+            # 涨速榜只展示上涨速；负涨速/零涨速一律丢掉
+            if speed < min_speed:
+                continue
+            if exclude_limit_up and is_limit_up_row(code, name, change_pct, price):
+                continue
             vol_hands = float(r.get("f5") or 0) if r.get("f5") not in ("-", None) else 0.0
             out.append(
                 {
                     "code": code,
-                    "name": str(r.get("f14") or code),
+                    "name": name,
                     "market": _market_prefix(code, mkt_flag),
-                    "price": float(r.get("f2") or 0) if r.get("f2") not in ("-", None) else 0.0,
-                    "change_pct": float(r.get("f3") or 0) if r.get("f3") not in ("-", None) else 0.0,
-                    "speed": float(r.get("f22") or 0) if r.get("f22") not in ("-", None) else 0.0,
+                    "price": price,
+                    "change_pct": change_pct,
+                    "speed": speed,
                     "amount": float(r.get("f6") or 0) if r.get("f6") not in ("-", None) else 0.0,
                     "volume": vol_hands * 100,
                     "turnover": float(r.get("f8") or 0) if r.get("f8") not in ("-", None) else 0.0,
@@ -2542,20 +2584,254 @@ class EastMoneyClient:
                     "open_times": 0,
                 }
             )
-            if len(out) >= limit:
-                break
-        if out:
-            return out
-        # 东财涨速榜失败：涨幅榜候选 + 腾讯行情，speed 暂用涨跌幅占位，保证有数据可看
-        return await self._fetch_speed_rank_fallback(limit)
+        out.sort(key=lambda x: float(x.get("speed") or 0), reverse=True)
+        return out
 
-    async def _fetch_speed_rank_fallback(self, limit: int) -> list[dict[str, Any]]:
-        """clist f22 失败时的兜底：新浪涨幅榜 + 腾讯盘口。"""
+    async def _fetch_speed_clist_raw(
+        self, fs: str, pull_n: int, *, po: str = "1", pages: int = 1
+    ) -> list[dict[str, Any]]:
+        pages = max(1, min(3, int(pages or 1)))
+        page_size = max(20, min(100, int(pull_n or 100)))
+        out: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for pn in range(1, pages + 1):
+            data: dict[str, Any] = {}
+            for base in (
+                "https://push2.eastmoney.com/api/qt/clist/get",
+                "https://82.push2.eastmoney.com/api/qt/clist/get",
+                "https://40.push2.eastmoney.com/api/qt/clist/get",
+                "https://push2delay.eastmoney.com/api/qt/clist/get",
+            ):
+                try:
+                    data = await self._get(
+                        base,
+                        {
+                            "pn": str(pn),
+                            "pz": str(page_size),
+                            "po": po,
+                            "np": "1",
+                            "fltt": "2",
+                            "invt": "2",
+                            "fid": "f22",
+                            "fs": fs,
+                            "fields": "f12,f13,f14,f2,f3,f5,f6,f8,f20,f21,f22,f100",
+                            "ut": "bd1d9ddb04089700cf9c27f6f7426281",
+                        },
+                        referer="https://quote.eastmoney.com/center/gridlist.html#hs_a_board",
+                    )
+                    if (data.get("data") or {}).get("diff") is not None:
+                        break
+                except Exception:
+                    continue
+            diff = (data.get("data") or {}).get("diff") or []
+            if isinstance(diff, dict):
+                try:
+                    chunk = [
+                        v
+                        for _, v in sorted(
+                            ((int(k), v) for k, v in diff.items() if str(k).isdigit()),
+                            key=lambda x: x[0],
+                        )
+                        if isinstance(v, dict)
+                    ] or [v for v in diff.values() if isinstance(v, dict)]
+                except Exception:
+                    chunk = [v for v in diff.values() if isinstance(v, dict)]
+            elif isinstance(diff, list):
+                chunk = [v for v in diff if isinstance(v, dict)]
+            else:
+                chunk = []
+            if not chunk:
+                break
+            for r in chunk:
+                code = str(r.get("f12") or "").zfill(6)
+                if not code.isdigit() or code in seen:
+                    continue
+                seen.add(code)
+                out.append(r)
+        return out
+
+    async def fetch_speed_rank(
+        self,
+        limit: int = 50,
+        board: str = "main",
+        *,
+        exclude_limit_up: bool = True,
+    ) -> list[dict[str, Any]]:
+        """A-share intraday speed ranking (东财涨速榜, fid=f22)。
+
+        只要涨速>0，强制按涨速从大到小；默认剔除已涨停。
+        主板 fs 偶发把跌速段排在前面，故扫满一页再本地重排，不足时回退全 A。
+        """
+        limit = max(1, min(100, int(limit or 50)))
+        board = normalize_board_bucket(board)
+        # 必须扫满候选再本地按涨速重排：接口顺序/板块 fs 偶发把负涨速排在前面
+        pull_n = min(100, max(80, limit * 2))
+
+        # 各板块优先直拉；全 A 作补充。最终只保留涨速>0 并降序截断。
+        by_code: dict[str, dict[str, Any]] = {}
+
+        async def _absorb(rows: list[dict[str, Any]]) -> None:
+            parsed = self._parse_speed_clist_rows(
+                rows, board=board, exclude_limit_up=exclude_limit_up
+            )
+            for x in parsed:
+                code = str(x["code"])
+                prev = by_code.get(code)
+                if prev is None or float(x.get("speed") or 0) > float(
+                    prev.get("speed") or 0
+                ):
+                    by_code[code] = x
+
+        if board == "all":
+            await _absorb(
+                await self._fetch_speed_clist_raw(_FS_ALL_A, 100, po="1", pages=2)
+            )
+        elif board == "main":
+            # 全 A 涨速榜前段常被双创占满；翻 2 页再筛主板，比主板 fs 更稳
+            await _absorb(
+                await self._fetch_speed_clist_raw(_FS_ALL_A, 100, po="1", pages=2)
+            )
+            if len(by_code) < limit:
+                await _absorb(
+                    await self._fetch_speed_clist_raw(
+                        _FS_BY_BOARD["main"], pull_n, po="1", pages=2
+                    )
+                )
+        else:
+            fs = _FS_BY_BOARD.get(board) or _FS_ALL_A
+            await _absorb(
+                await self._fetch_speed_clist_raw(fs, pull_n, po="1", pages=1)
+            )
+            if len(by_code) < limit:
+                await _absorb(
+                    await self._fetch_speed_clist_raw(_FS_ALL_A, 100, po="1", pages=2)
+                )
+
+        out = sorted(
+            by_code.values(),
+            key=lambda x: float(x.get("speed") or 0),
+            reverse=True,
+        )
+        if out:
+            return out[:limit]
+        return await self._fetch_speed_rank_fallback(
+            limit, board=board, exclude_limit_up=exclude_limit_up
+        )
+
+    async def _fetch_speed_rank_fallback(
+        self,
+        limit: int,
+        board: str = "all",
+        *,
+        exclude_limit_up: bool = True,
+    ) -> list[dict[str, Any]]:
+        """clist f22 失败时的兜底：东财涨幅榜(f3) → 新浪+腾讯；仅正值并降序。"""
+        board = normalize_board_bucket(board)
+        fs = _FS_BY_BOARD.get(board) or _FS_ALL_A
+
+        # 1) 东财涨幅榜（fid=f3）按板块直拉，字段里仍带 f22，有则用真涨速
+        data: dict[str, Any] = {}
+        for base in (
+            "https://push2.eastmoney.com/api/qt/clist/get",
+            "https://82.push2.eastmoney.com/api/qt/clist/get",
+            "https://40.push2.eastmoney.com/api/qt/clist/get",
+        ):
+            try:
+                data = await self._get(
+                    base,
+                    {
+                        "pn": "1",
+                        "pz": "100",
+                        "po": "1",
+                        "np": "1",
+                        "fltt": "2",
+                        "invt": "2",
+                        "fid": "f3",
+                        "fs": fs,
+                        "fields": "f12,f13,f14,f2,f3,f5,f6,f8,f20,f21,f22,f100",
+                        "ut": "bd1d9ddb04089700cf9c27f6f7426281",
+                    },
+                    referer="https://quote.eastmoney.com/center/gridlist.html#hs_a_board",
+                )
+                if (data.get("data") or {}).get("diff") is not None:
+                    break
+            except Exception:
+                continue
+        diff = (data.get("data") or {}).get("diff") or []
+        if isinstance(diff, dict):
+            rows = [v for v in diff.values() if isinstance(v, dict)]
+        elif isinstance(diff, list):
+            rows = [v for v in diff if isinstance(v, dict)]
+        else:
+            rows = []
+        # 优先真涨速；若 f22 全空/非正则用正涨幅近似，绝不进负值
+        parsed = self._parse_speed_clist_rows(
+            rows, board=board, exclude_limit_up=exclude_limit_up, min_speed=0.01
+        )
+        if len(parsed) < max(5, limit // 5):
+            approx: list[dict[str, Any]] = []
+            for r in rows:
+                code = str(r.get("f12") or "").zfill(6)
+                if not code.isdigit() or not match_board_bucket(code, board):
+                    continue
+                name = str(r.get("f14") or code)
+                price = float(r.get("f2") or 0) if r.get("f2") not in ("-", None) else 0.0
+                pct = float(r.get("f3") or 0) if r.get("f3") not in ("-", None) else 0.0
+                speed = float(r.get("f22") or 0) if r.get("f22") not in ("-", None) else 0.0
+                use_speed = speed if speed >= 0.01 else pct
+                if use_speed < 0.01:
+                    continue
+                if exclude_limit_up and is_limit_up_row(code, name, pct, price):
+                    continue
+                try:
+                    mkt_flag = int(r.get("f13")) if r.get("f13") is not None else None
+                except (TypeError, ValueError):
+                    mkt_flag = None
+                industry = str(r.get("f100") or "")
+                vol_hands = (
+                    float(r.get("f5") or 0) if r.get("f5") not in ("-", None) else 0.0
+                )
+                approx.append(
+                    {
+                        "code": code,
+                        "name": name,
+                        "market": _market_prefix(code, mkt_flag),
+                        "price": price,
+                        "change_pct": pct,
+                        "speed": use_speed,
+                        "amount": float(r.get("f6") or 0)
+                        if r.get("f6") not in ("-", None)
+                        else 0.0,
+                        "volume": vol_hands * 100,
+                        "turnover": float(r.get("f8") or 0)
+                        if r.get("f8") not in ("-", None)
+                        else 0.0,
+                        "total_mv": float(r.get("f20") or 0)
+                        if r.get("f20") not in ("-", None)
+                        else 0.0,
+                        "float_mv": float(r.get("f21") or 0)
+                        if r.get("f21") not in ("-", None)
+                        else 0.0,
+                        "industry": industry,
+                        "concepts": [industry] if industry else [],
+                        "board_count": 1,
+                        "open_times": 0,
+                    }
+                )
+            approx.sort(key=lambda x: float(x.get("speed") or 0), reverse=True)
+            if approx:
+                parsed = approx
+        if parsed:
+            return parsed[:limit]
+
+        # 2) 新浪涨幅榜 + 腾讯盘口
         try:
             seeds = await self._fetch_auction_rank_codes_sina(each=max(limit, 80))
         except Exception:
             seeds = []
-        codes = [c for c, _ in seeds][: max(limit * 2, 80)]
+        codes = [c for c, _ in seeds if match_board_bucket(c, board)][
+            : max(limit * 2, 80)
+        ]
         if not codes:
             return []
         try:
@@ -2571,14 +2847,19 @@ class EastMoneyClient:
             if name.startswith(("N", "C", "n", "c")):
                 continue
             pct = float(q.get("change_pct") or 0)
+            price = float(q.get("price") or 0)
+            limit_up = float(q.get("limit_up") or 0)
+            if pct < 0.01:
+                continue
+            if exclude_limit_up and is_limit_up_row(code, name, pct, price, limit_up):
+                continue
             out.append(
                 {
                     "code": code,
                     "name": name,
                     "market": str(q.get("market") or _market_prefix(code)),
-                    "price": float(q.get("price") or 0),
+                    "price": price,
                     "change_pct": pct,
-                    # 无分钟涨速时用涨跌幅近似，避免整榜空白
                     "speed": pct,
                     "amount": float(q.get("amount") or 0),
                     "volume": float(q.get("volume") or 0),

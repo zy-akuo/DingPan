@@ -216,6 +216,8 @@ export function MonitorTable({
   scrollY = "calc(100vh - 340px)",
   rowClassName,
   preserveScroll = false,
+  selectedRowKeys,
+  onSelectedRowKeysChange,
 }: {
   data: StockItem[];
   columns: string[];
@@ -227,6 +229,9 @@ export function MonitorTable({
   rowClassName?: (r: StockItem) => string;
   /** 高频刷新时锁定表体滚动位置，避免闪屏/跳动 */
   preserveScroll?: boolean;
+  /** 多选行（如涨速榜加入异动播报） */
+  selectedRowKeys?: string[];
+  onSelectedRowKeysChange?: (keys: string[]) => void;
 }) {
   const cols = useMemo(
     () => buildColumns(columns, onOpenChart, extraActions),
@@ -300,6 +305,16 @@ export function MonitorTable({
         scroll={{ y: scrollY, x: scrollX }}
         dataSource={data}
         columns={cols}
+        rowSelection={
+          onSelectedRowKeysChange
+            ? {
+                selectedRowKeys: selectedRowKeys || [],
+                onChange: (keys) =>
+                  onSelectedRowKeysChange(keys.map((k) => String(k))),
+                preserveSelectedRowKeys: true,
+              }
+            : undefined
+        }
         rowClassName={(r) =>
           rowClassName
             ? rowClassName(r)

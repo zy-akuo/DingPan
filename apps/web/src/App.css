@@ -290,6 +290,12 @@ body {
   margin-bottom: 8px;
 }
 
+.watch-toolbar .muted,
+.speed-panel .filter-count .muted {
+  color: var(--muted);
+  font-weight: 400;
+}
+
 .history-panel {
   display: flex;
   flex-direction: column;

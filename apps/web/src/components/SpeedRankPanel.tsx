@@ -1,4 +1,4 @@
-import { Input } from "antd";
+import { Button, Input, Segmented, Space, message } from "antd";
 import {
   startTransition,
   useCallback,
@@ -7,10 +7,17 @@ import {
   useRef,
   useState,
 } from "react";
+import {
+  BOARD_TAB_OPTIONS,
+  type BoardBucket,
+} from "../lib/boardBucket";
 import { mergeRows, quoteListSignature } from "../lib/stockRows";
+import { loadAlertlist, saveAlertlist } from "../lib/watchlist";
 import type { StockItem } from "../types";
 import { MonitorTable } from "./MonitorTable";
 import { StockChartModal } from "./StockChartModal";
+
+const SPEED_LIMIT = 50;
 
 export function SpeedRankPanel({
   columns,
@@ -23,16 +30,21 @@ export function SpeedRankPanel({
   selectedCode?: string | null;
   pollSec?: number;
 }) {
+  const [board, setBoard] = useState<BoardBucket>("main");
   const [rows, setRows] = useState<StockItem[]>([]);
   const [kw, setKw] = useState("");
   const [updated, setUpdated] = useState("");
   const [chartStock, setChartStock] = useState<StockItem | null>(null);
+  const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
+  const [adding, setAdding] = useState(false);
   const timer = useRef<number | null>(null);
   const seq = useRef(0);
   const sigRef = useRef("");
   const abortRef = useRef<AbortController | null>(null);
   const rowsRef = useRef<StockItem[]>([]);
   const filteredRef = useRef<StockItem[]>([]);
+  const boardRef = useRef(board);
+  boardRef.current = board;
 
   useEffect(() => {
     rowsRef.current = rows;
@@ -41,18 +53,23 @@ export function SpeedRankPanel({
   const refresh = useCallback(async () => {
     // 不取消进行中的请求：慢成功不应被下一轮 abort 掉；用序号丢弃过期回包
     const my = ++seq.current;
+    const boardAtStart = boardRef.current;
     const ac = new AbortController();
     abortRef.current = ac;
     try {
-      const res = await fetch("/api/market/speed?limit=50", {
-        signal: ac.signal,
-      });
-      if (!res.ok || my !== seq.current) return;
+      const res = await fetch(
+        `/api/market/speed?limit=${SPEED_LIMIT}&board=${encodeURIComponent(boardAtStart)}`,
+        { signal: ac.signal },
+      );
+      if (!res.ok || my !== seq.current || boardRef.current !== boardAtStart) return;
       const data = (await res.json()) as {
         items: StockItem[];
         updated_at?: string;
       };
-      const items = data.items || [];
+      // 前端再兜底：只要涨速>0，并按涨速从大到小
+      const items = (data.items || [])
+        .filter((s) => Number(s.speed ?? 0) > 0)
+        .sort((a, b) => Number(b.speed ?? 0) - Number(a.speed ?? 0));
       // 空结果：保留已有列表，只刷新时间戳（若有）
       if (!items.length) {
         if (data.updated_at && my === seq.current && rowsRef.current.length) {
@@ -64,7 +81,12 @@ export function SpeedRankPanel({
       if (sig !== sigRef.current) {
         sigRef.current = sig;
         startTransition(() => {
-          setRows((prev) => mergeRows(prev, items, { keepOnEmpty: true }));
+          setRows((prev) => {
+            const merged = mergeRows(prev, items, { keepOnEmpty: true });
+            return [...merged]
+              .filter((s) => Number(s.speed ?? 0) > 0)
+              .sort((a, b) => Number(b.speed ?? 0) - Number(a.speed ?? 0));
+          });
         });
       }
       if (data.updated_at && my === seq.current) {
@@ -79,6 +101,8 @@ export function SpeedRankPanel({
   useEffect(() => {
     seq.current += 1;
     sigRef.current = "";
+    setRows([]);
+    setSelectedKeys([]);
     void refresh();
     if (timer.current) window.clearInterval(timer.current);
     const ms = Math.max(500, Math.round((pollSec || 1.5) * 1000));
@@ -88,7 +112,7 @@ export function SpeedRankPanel({
       abortRef.current?.abort();
       seq.current += 1;
     };
-  }, [pollSec, refresh]);
+  }, [pollSec, refresh, board]);
 
   const displayCols = useMemo(() => {
     if (columns.includes("speed")) return columns;
@@ -121,19 +145,63 @@ export function SpeedRankPanel({
     return next;
   }, [rows, kw]);
 
+  const addToAlert = useCallback(async () => {
+    if (!selectedKeys.length || adding) return;
+    setAdding(true);
+    try {
+      const cur = await loadAlertlist();
+      const exist = new Set(cur.codes);
+      const add = selectedKeys.filter((c) => !exist.has(c));
+      if (!add.length) {
+        message.info("所选股票已在异动播报中");
+        return;
+      }
+      await saveAlertlist([...cur.codes, ...add], cur.pinned);
+      message.success(`已添加 ${add.length} 只到异动播报`);
+      setSelectedKeys([]);
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : "添加失败");
+    } finally {
+      setAdding(false);
+    }
+  }, [selectedKeys, adding]);
+
   return (
     <div className="speed-panel">
       <div className="watch-toolbar">
+        <Segmented
+          size="small"
+          value={board}
+          options={BOARD_TAB_OPTIONS}
+          onChange={(v) => setBoard(v as BoardBucket)}
+        />
         <Input
-          style={{ width: 220 }}
+          style={{ width: 180 }}
           allowClear
           placeholder="搜索涨速榜"
           value={kw}
           onChange={(e) => setKw(e.target.value)}
         />
+        <Space size={8}>
+          <Button
+            type="primary"
+            size="small"
+            disabled={!selectedKeys.length}
+            loading={adding}
+            onClick={() => void addToAlert()}
+          >
+            加入异动播报{selectedKeys.length ? ` (${selectedKeys.length})` : ""}
+          </Button>
+          {selectedKeys.length ? (
+            <Button size="small" onClick={() => setSelectedKeys([])}>
+              清除选择
+            </Button>
+          ) : null}
+        </Space>
         <span className="filter-count">
-          {filtered.length} 只
+          前 {SPEED_LIMIT} · {filtered.length} 只
           {updated ? ` · 更新 ${updated}` : ""}
+          <span className="muted"> · 涨速降序 · 已隐藏涨停/负涨速</span>
         </span>
       </div>
       <MonitorTable
@@ -143,6 +211,8 @@ export function SpeedRankPanel({
         selectedCode={selectedCode}
         onOpenChart={setChartStock}
         preserveScroll
+        selectedRowKeys={selectedKeys}
+        onSelectedRowKeysChange={setSelectedKeys}
       />
       <StockChartModal
         stock={chartStock}

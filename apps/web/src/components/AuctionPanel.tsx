@@ -1,6 +1,22 @@
 import { ReloadOutlined, SearchOutlined } from "@ant-design/icons";
-import { Button, Empty, Input, Select, Space, Spin, Tabs, Tag, message } from "antd";
+import {
+  Button,
+  Empty,
+  Input,
+  Segmented,
+  Select,
+  Space,
+  Spin,
+  Tabs,
+  Tag,
+  message,
+} from "antd";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  BOARD_TAB_OPTIONS,
+  matchBoardBucket,
+  type BoardBucket,
+} from "../lib/boardBucket";
 import { AuctionVirtualList } from "./AuctionVirtualList";
 import { collectRegions } from "./MonitorFilterBar";
 import { matchNameOrInitials } from "../lib/stockMatch";
@@ -415,6 +431,8 @@ function AuctionBoardTab({
 }) {
   const [kw, setKw] = useState("");
   const [region, setRegion] = useState("");
+  // 默认主板：在已采集竞价池上本地过滤，零额外请求（优于再拉前100）
+  const [board, setBoard] = useState<BoardBucket>("main");
 
   const [refreshing, setRefreshing] = useState(false);
 
@@ -449,9 +467,17 @@ function AuctionBoardTab({
 
   const col = data?.column;
   const displayMode = data?.display_mode || "";
+  const yizhiAll = col?.yizhi_items;
+  const otherAll = col?.other_items;
 
-  const yizhi = col?.yizhi_items || [];
-  const other = col?.other_items || [];
+  const yizhi = useMemo(
+    () => (yizhiAll || []).filter((s) => matchBoardBucket(s.code, board)),
+    [yizhiAll, board],
+  );
+  const other = useMemo(
+    () => (otherAll || []).filter((s) => matchBoardBucket(s.code, board)),
+    [otherAll, board],
+  );
 
   const regions = useMemo(() => {
     const rows: { region?: string }[] = [];
@@ -480,7 +506,9 @@ function AuctionBoardTab({
       ? "已清空上一交易日数据，9:15 起自动采集今日竞价"
       : displayMode === "display_prev"
         ? "暂无上一交易日竞价快照"
-        : "暂无竞价数据（竞价时段自动采集 9:15/9:20/9:25）";
+        : !(yizhiAll?.length || otherAll?.length)
+          ? "暂无竞价数据（竞价时段自动采集 9:15/9:20/9:25）"
+          : "当前板块暂无竞价数据";
 
   const renderSection = (title: string, items: AuctionStock[]) => (
     <div className="auction-wide-section" key={title}>
@@ -516,6 +544,12 @@ function AuctionBoardTab({
     <div className="auction-board">
       <div className="auction-toolbar">
         <Space wrap>
+          <Segmented
+            size="small"
+            value={board}
+            options={BOARD_TAB_OPTIONS}
+            onChange={(v) => setBoard(v as BoardBucket)}
+          />
           <Input
             allowClear
             prefix={<SearchOutlined />}
@@ -539,8 +573,10 @@ function AuctionBoardTab({
           ) : null}
           {col && displayMode !== "warming" ? (
             <span className="muted">
-              一字 {col.yizhi_count ?? yizhi.length} | 封单{" "}
-              {formatMoney(col.seal_total || 0)}
+              一字 {yizhi.length} | 非一字 {other.length} | 封单{" "}
+              {formatMoney(
+                yizhi.reduce((a, s) => a + Number(s.seal_0925 || s.seal_0920 || s.seal_0915 || 0), 0),
+              )}
             </span>
           ) : null}
           {updatedAt ? (
