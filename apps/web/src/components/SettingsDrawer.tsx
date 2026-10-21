@@ -1,7 +1,11 @@
+import { ArrowDownOutlined, ArrowUpOutlined } from "@ant-design/icons";
 import { Button, Checkbox, Drawer, InputNumber, Space, Switch } from "antd";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { FieldConfig } from "../types";
-import { DEFAULT_ALERT_SPEECH_TYPES } from "../types";
+import {
+  DEFAULT_ALERT_SPEECH_TYPES,
+  normalizeSpeedTableColumns,
+} from "../types";
 
 export function SettingsDrawer({
   open,
@@ -20,7 +24,12 @@ export function SettingsDrawer({
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    if (open) setDraft(value);
+    if (open) {
+      setDraft({
+        ...value,
+        speed_table_columns: normalizeSpeedTableColumns(value.speed_table_columns),
+      });
+    }
   }, [open, value]);
 
   const pollSec = draft.poll_interval_sec ?? 2.5;
@@ -31,6 +40,20 @@ export function SettingsDrawer({
   const alertEnabled = draft.alert_speech_enabled !== false;
   const rangeWindowSec = draft.alert_range_window_sec ?? 60;
   const rangePct = draft.alert_range_pct ?? 3;
+  const speedCols = useMemo(
+    () => normalizeSpeedTableColumns(draft.speed_table_columns),
+    [draft.speed_table_columns],
+  );
+
+  const moveSpeedCol = (index: number, dir: -1 | 1) => {
+    const next = [...speedCols];
+    const j = index + dir;
+    if (j < 0 || j >= next.length) return;
+    const tmp = next[index];
+    next[index] = next[j];
+    next[j] = tmp;
+    setDraft({ ...draft, speed_table_columns: next });
+  };
 
   return (
     <Drawer
@@ -81,6 +104,10 @@ export function SettingsDrawer({
                   alert_speech_types:
                     draft.alert_speech_types ?? [...DEFAULT_ALERT_SPEECH_TYPES],
                   alert_speech_enabled: draft.alert_speech_enabled !== false,
+                  show_st_stocks: draft.show_st_stocks !== false,
+                  speed_table_columns: normalizeSpeedTableColumns(
+                    draft.speed_table_columns,
+                  ),
                 });
                 onClose();
               } finally {
@@ -165,6 +192,23 @@ export function SettingsDrawer({
           </Space>
           <div style={{ color: "var(--muted)", fontSize: 12, lineHeight: 1.5 }}>
             开启后在晋级成功标的下方显示首封/回封时间，炸板标的显示炸板时间。
+          </div>
+        </Space>
+      </div>
+
+      <div className="settings-block">
+        <h4>ST 股票</h4>
+        <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+          <Space>
+            <span>显示 ST / *ST / 退市股</span>
+            <Switch
+              checked={draft.show_st_stocks !== false}
+              onChange={(v) => setDraft({ ...draft, show_st_stocks: v })}
+            />
+          </Space>
+          <div style={{ color: "var(--muted)", fontSize: 12, lineHeight: 1.5 }}>
+            关闭后，实时监控、连板天梯、涨速榜、竞价、历史回溯、重点观察与异动播报均不再展示或拉取
+            ST/*ST/退市股。避雷啦面板不受影响。
           </div>
         </Space>
       </div>
@@ -293,6 +337,36 @@ export function SettingsDrawer({
           value={draft.table_columns}
           onChange={(v) => setDraft({ ...draft, table_columns: v as string[] })}
         />
+      </div>
+
+      <div className="settings-block">
+        <h4>涨速榜列（顺序可调）</h4>
+        <div style={{ color: "var(--muted)", fontSize: 12, marginBottom: 8, lineHeight: 1.5 }}>
+          固定展示全部 15 列，可用上下箭头调整顺序；与监控表格列配置独立。
+        </div>
+        <div className="speed-col-order">
+          {speedCols.map((key, i) => (
+            <div key={key} className="speed-col-order-row">
+              <span className="speed-col-order-label">
+                {i + 1}. {available[key] || key}
+              </span>
+              <Space size={4}>
+                <Button
+                  size="small"
+                  icon={<ArrowUpOutlined />}
+                  disabled={i === 0}
+                  onClick={() => moveSpeedCol(i, -1)}
+                />
+                <Button
+                  size="small"
+                  icon={<ArrowDownOutlined />}
+                  disabled={i === speedCols.length - 1}
+                  onClick={() => moveSpeedCol(i, 1)}
+                />
+              </Space>
+            </div>
+          ))}
+        </div>
       </div>
 
       <div className="settings-block">

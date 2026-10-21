@@ -20,6 +20,7 @@ import {
 import { AuctionVirtualList } from "./AuctionVirtualList";
 import { collectRegions } from "./MonitorFilterBar";
 import { matchNameOrInitials } from "../lib/stockMatch";
+import { filterStItems } from "../lib/stStock";
 import type { StockItem } from "../types";
 import { formatMoney, formatPct } from "../types";
 
@@ -132,6 +133,24 @@ function pctClass(v?: number | null): string {
 function pctText(v?: number | null): string {
   if (v == null || Number.isNaN(v)) return "—";
   return formatPct(v);
+}
+
+/** 接近涨停的竞价涨幅阈值（与后端 _limit_thr_for 对齐） */
+function nearLimitThr(code?: string, name?: string): number {
+  const n = (name || "").trim().replace(/ＳＴ/g, "ST").replace(/＊/g, "*");
+  if (
+    n.startsWith("*ST") ||
+    n.startsWith("ST*") ||
+    n.startsWith("ST") ||
+    n.startsWith("退市")
+  ) {
+    return 4.85;
+  }
+  const c = String(code || "").padStart(6, "0");
+  if (c.startsWith("300") || c.startsWith("301") || c.startsWith("688")) {
+    return 19.5;
+  }
+  return 9.5;
 }
 
 function mvText(v?: number | null): string {
@@ -424,10 +443,12 @@ function AuctionBoardTab({
   pollSec,
   enabled,
   onOpenDetail,
+  showStStocks = true,
 }: {
   pollSec: number;
   enabled: boolean;
   onOpenDetail?: (s: StockItem) => void;
+  showStStocks?: boolean;
 }) {
   const [kw, setKw] = useState("");
   const [region, setRegion] = useState("");
@@ -471,12 +492,20 @@ function AuctionBoardTab({
   const otherAll = col?.other_items;
 
   const yizhi = useMemo(
-    () => (yizhiAll || []).filter((s) => matchBoardBucket(s.code, board)),
-    [yizhiAll, board],
+    () =>
+      filterStItems(
+        (yizhiAll || []).filter((s) => matchBoardBucket(s.code, board)),
+        showStStocks,
+      ),
+    [yizhiAll, board, showStStocks],
   );
   const other = useMemo(
-    () => (otherAll || []).filter((s) => matchBoardBucket(s.code, board)),
-    [otherAll, board],
+    () =>
+      filterStItems(
+        (otherAll || []).filter((s) => matchBoardBucket(s.code, board)),
+        showStStocks,
+      ),
+    [otherAll, board, showStStocks],
   );
 
   const regions = useMemo(() => {
@@ -616,13 +645,16 @@ function AuctionPrevTab({
   pollSec,
   enabled,
   onOpenDetail,
+  showStStocks = true,
 }: {
   pollSec: number;
   enabled: boolean;
   onOpenDetail?: (s: StockItem) => void;
+  showStStocks?: boolean;
 }) {
   const [kw, setKw] = useState("");
   const [region, setRegion] = useState("");
+  const [refreshing, setRefreshing] = useState(false);
 
   const fetcher = useCallback(async () => {
     const res = await fetch("/api/auction/prev-ladder");
@@ -630,8 +662,39 @@ function AuctionPrevTab({
     return (await res.json()) as PrevPayload;
   }, []);
 
-  const { data, loading, updatedAt } = useStablePoll(fetcher, pollSec, enabled);
-  const groups = data?.groups || [];
+  const { data, loading, updatedAt, applyPayload } = useStablePoll(
+    fetcher,
+    pollSec,
+    enabled,
+  );
+
+  const onManualRefresh = useCallback(async () => {
+    if (refreshing) return;
+    setRefreshing(true);
+    try {
+      const res = await fetch("/api/auction/prev-ladder/refresh", {
+        method: "POST",
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const next = (await res.json()) as PrevPayload & { error?: string };
+      if (next.error) throw new Error(String(next.error));
+      applyPayload(next);
+      message.success("已强制刷新昨日连板竞价");
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : "刷新失败");
+    } finally {
+      setRefreshing(false);
+    }
+  }, [applyPayload, refreshing]);
+
+  const groups = useMemo(() => {
+    const raw = data?.groups || [];
+    if (showStStocks) return raw;
+    return raw.map((g) => {
+      const stocks = filterStItems(g.stocks || [], false);
+      return { ...g, stocks, count: stocks.length };
+    });
+  }, [data?.groups, showStStocks]);
 
   const regions = useMemo(() => {
     const rows: { region?: string }[] = [];
@@ -692,6 +755,15 @@ function AuctionPrevTab({
         {updatedAt ? (
           <span className="muted">更新 {updatedAt.slice(11, 19)}</span>
         ) : null}
+        <Button
+          size="small"
+          icon={<ReloadOutlined spin={refreshing} />}
+          loading={refreshing}
+          onClick={() => void onManualRefresh()}
+          title="强制重算昨日连板竞价涨幅（竞价中会同步重采观察池）"
+        >
+          刷新
+        </Button>
         {data?.phase === "auction" ? (
           <Tag color="red">竞价中</Tag>
         ) : (
@@ -728,7 +800,9 @@ function AuctionPrevTab({
                     const dim = searching && !hit;
                     const pct = s.auction_pct;
                     const nearLimit =
-                      pct != null && !Number.isNaN(pct) && pct >= 9.5;
+                      pct != null &&
+                      !Number.isNaN(pct) &&
+                      pct >= nearLimitThr(s.code, s.name);
                     return (
                       <button
                         type="button"
@@ -781,9 +855,11 @@ function AuctionPrevTab({
 export function AuctionPanel({
   pollSec = 1.0,
   onOpenDetail,
+  showStStocks = true,
 }: {
   pollSec?: number;
   onOpenDetail?: (s: StockItem) => void;
+  showStStocks?: boolean;
 }) {
   const [tab, setTab] = useState("board");
   const sec = Math.max(1.0, Math.min(5, Number(pollSec) || 1.0));
@@ -803,6 +879,7 @@ export function AuctionPanel({
                 pollSec={sec}
                 enabled={tab === "board"}
                 onOpenDetail={onOpenDetail}
+                showStStocks={showStStocks}
               />
             ),
           },
@@ -814,6 +891,7 @@ export function AuctionPanel({
                 pollSec={sec}
                 enabled={tab === "prev"}
                 onOpenDetail={onOpenDetail}
+                showStStocks={showStStocks}
               />
             ),
           },

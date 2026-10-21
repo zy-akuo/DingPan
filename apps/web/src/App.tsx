@@ -24,10 +24,55 @@ import { WatchlistPanel } from "./components/WatchlistPanel";
 import { useMarketSocket } from "./hooks/useMarketSocket";
 import { useSpeech } from "./hooks/useSpeech";
 import { cacheGet, cachePurgeExpired, cacheSet } from "./lib/localCache";
+import { filterStItems, isStLikeName } from "./lib/stStock";
 import { applyThemeToDom, loadTheme, saveTheme, type ThemeMode } from "./lib/theme";
-import type { AlertEvent, FieldConfig, StockItem, UserConfig } from "./types";
-import { DEFAULT_ALERT_SPEECH_TYPES, tradeDateLabel } from "./types";
+import type {
+  AlertEvent,
+  FieldConfig,
+  MarketSnapshot,
+  StockItem,
+  UserConfig,
+} from "./types";
+import {
+  DEFAULT_ALERT_SPEECH_TYPES,
+  DEFAULT_SPEED_TABLE_COLUMNS,
+  normalizeSpeedTableColumns,
+  tradeDateLabel,
+} from "./types";
 import "./App.css";
+
+function applyStVisibility(snap: MarketSnapshot, showSt: boolean): MarketSnapshot {
+  if (showSt) return snap;
+  const zt = filterStItems(snap.zt, false);
+  const lb = filterStItems(snap.lb, false);
+  const zb = filterStItems(snap.zb, false);
+  const dt = filterStItems(snap.dt, false);
+  const ladder = (snap.ladder || []).map((g) => ({
+    ...g,
+    stocks: filterStItems(g.stocks, false),
+  }));
+  const denom = zt.length + zb.length;
+  const sealToday = denom ? Math.round((zt.length / denom) * 1000) / 10 : 0;
+  return {
+    ...snap,
+    zt,
+    lb,
+    zb,
+    dt,
+    ladder,
+    summary: {
+      ...snap.summary,
+      zt_today: zt.length,
+      lb_today: lb.length,
+      zb_today: zb.length,
+      dt_today: dt.length,
+      seal_rate_today: sealToday,
+    },
+    speech_events: (snap.speech_events || []).filter((e) => !isStLikeName(e.name)),
+    alert_events: (snap.alert_events || []).filter((e) => !isStLikeName(e.name)),
+    alert_feed: (snap.alert_feed || []).filter((e) => !isStLikeName(e.name)),
+  };
+}
 
 const defaultFields: FieldConfig = {
   table_columns: [
@@ -54,6 +99,7 @@ const defaultFields: FieldConfig = {
     "region",
     "industry",
   ],
+  speed_table_columns: [...DEFAULT_SPEED_TABLE_COLUMNS],
   speech_enabled: false,
   speech_mode: "realtime",
   speech_types: ["zt", "lb", "zb"],
@@ -61,6 +107,7 @@ const defaultFields: FieldConfig = {
   speed_poll_interval_sec: 1.5,
   auction_poll_interval_sec: 1.0,
   ladder_show_times: true,
+  show_st_stocks: true,
   alert_speech_enabled: true,
   alert_speech_types: [...DEFAULT_ALERT_SPEECH_TYPES],
   alert_speech_interval_sec: 1,
@@ -119,9 +166,13 @@ export default function App() {
     applyThemeToDom(themeMode);
   }, [themeMode]);
 
+  const showStStocks = fields.show_st_stocks !== false;
+
   useEffect(() => {
-    startTransition(() => setSnapshot(rawSnapshot));
-  }, [rawSnapshot, startTransition]);
+    startTransition(() =>
+      setSnapshot(applyStVisibility(rawSnapshot, showStStocks)),
+    );
+  }, [rawSnapshot, showStStocks, startTransition]);
 
   useEffect(() => {
     cachePurgeExpired();
@@ -212,6 +263,9 @@ export default function App() {
             else types.push("range_move");
           }
           merged.alert_speech_types = types;
+          merged.speed_table_columns = normalizeSpeedTableColumns(
+            merged.speed_table_columns,
+          );
           setFields(merged);
         }
         if (data.available_fields) setAvailable(data.available_fields);
@@ -220,16 +274,22 @@ export default function App() {
   }, []);
 
   const saveFields = useCallback(async (v: FieldConfig) => {
+    const payload = {
+      ...v,
+      speed_table_columns: normalizeSpeedTableColumns(v.speed_table_columns),
+    };
     const res = await fetch("/api/config/fields", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(v),
+      body: JSON.stringify(payload),
     });
     if (res.ok) {
       const cfg = (await res.json()) as UserConfig;
-      setFields({ ...defaultFields, ...(cfg.fields || v) });
+      const next = { ...defaultFields, ...(cfg.fields || payload) };
+      next.speed_table_columns = normalizeSpeedTableColumns(next.speed_table_columns);
+      setFields(next);
     } else {
-      setFields(v);
+      setFields(payload);
     }
   }, []);
 
@@ -376,6 +436,7 @@ export default function App() {
               onRowClick={openDetail}
               selectedCode={selectedCode}
               pollSec={fields.poll_interval_sec ?? 2.5}
+              showStStocks={showStStocks}
             />
           </section>
         ) : mainTab === "alert" ? (
@@ -411,10 +472,11 @@ export default function App() {
         ) : mainTab === "speed" ? (
           <section className="panel">
             <SpeedRankPanel
-              columns={fields.table_columns}
+              columns={normalizeSpeedTableColumns(fields.speed_table_columns)}
               onRowClick={openDetail}
               selectedCode={selectedCode}
               pollSec={fields.speed_poll_interval_sec ?? 1.5}
+              showStStocks={showStStocks}
             />
           </section>
         ) : mainTab === "auction" ? (
@@ -422,6 +484,7 @@ export default function App() {
             <AuctionPanel
               pollSec={fields.auction_poll_interval_sec ?? 1.0}
               onOpenDetail={openDetailFromLadder}
+              showStStocks={showStStocks}
             />
           </section>
         ) : (
@@ -432,6 +495,7 @@ export default function App() {
               selectedCode={selectedCode}
               date={historyDate}
               onDateChange={setHistoryDate}
+              showStStocks={showStStocks}
             />
           </section>
         )}

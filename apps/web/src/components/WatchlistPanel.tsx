@@ -14,6 +14,7 @@ import {
   quoteListSignature,
   stabilizeList,
 } from "../lib/stockRows";
+import { filterStItems, isStLikeName } from "../lib/stStock";
 import { loadWatchlist, saveWatchlist } from "../lib/watchlist";
 import type { StockItem } from "../types";
 import { MonitorTable } from "./MonitorTable";
@@ -26,11 +27,13 @@ export function WatchlistPanel({
   onRowClick,
   selectedCode,
   pollSec = 2.5,
+  showStStocks = true,
 }: {
   columns: string[];
   onRowClick: (s: StockItem) => void;
   selectedCode?: string | null;
   pollSec?: number;
+  showStStocks?: boolean;
 }) {
   const [codes, setCodes] = useState<string[]>([]);
   const [pinned, setPinned] = useState<string[]>([]);
@@ -140,8 +143,11 @@ export function WatchlistPanel({
         );
         if (!res.ok) return;
         const data = (await res.json()) as { items: Suggest[] };
+        const items = (data.items || []).filter(
+          (it) => showStStocks || !isStLikeName(it.name),
+        );
         setOptions(
-          (data.items || []).map((it) => ({
+          items.map((it) => ({
             value: `${it.code} ${it.name}`,
             label: `${it.market || ""} ${it.code} ${it.name}`,
             item: it,
@@ -154,6 +160,10 @@ export function WatchlistPanel({
   };
 
   const addStock = (item: Suggest) => {
+    if (!showStStocks && isStLikeName(item.name)) {
+      message.info("已关闭 ST 股票展示，无法添加");
+      return;
+    }
     if (codes.includes(item.code)) {
       message.info("已在观察列表中");
       return;
@@ -190,9 +200,9 @@ export function WatchlistPanel({
 
   const filtered = useMemo(() => {
     const kw = filterKw.trim().toLowerCase();
-    let list = rows;
+    let list = filterStItems(rows, showStStocks);
     if (kw) {
-      list = rows.filter(
+      list = list.filter(
         (s) =>
           s.code.includes(kw) ||
           (s.name || "").toLowerCase().includes(kw) ||
@@ -209,7 +219,7 @@ export function WatchlistPanel({
     const stable = stabilizeList(filteredRef.current, sorted);
     filteredRef.current = stable;
     return stable;
-  }, [rows, filterKw, codes, pinSet]);
+  }, [rows, filterKw, codes, pinSet, showStStocks]);
 
   const onOpenChart = useCallback((s: StockItem) => {
     setChartStock(s);

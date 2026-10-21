@@ -20,7 +20,7 @@ from .db import (
     update_field_config,
     update_watchlist,
 )
-from .models import AVAILABLE_FIELDS, FieldConfig
+from .models import AVAILABLE_FIELDS, FieldConfig, normalize_speed_table_columns
 from .services.market import market_service
 from .services.ttl_cache import ttl_cache, trading_ttl
 
@@ -50,6 +50,7 @@ async def lifespan(app: FastAPI):
     )
     alert_task = asyncio.create_task(market_service.alert_loop())
     fund_task = asyncio.create_task(market_service.fund_worker())
+    gene_task = asyncio.create_task(market_service.gene_worker())
     history_task = asyncio.create_task(market_service.history_backfill_worker(120))
     risk_task = asyncio.create_task(market_service.risk_worker(600))
     auction_task = asyncio.create_task(market_service.auction_loop())
@@ -59,6 +60,7 @@ async def lifespan(app: FastAPI):
         poll_task,
         alert_task,
         fund_task,
+        gene_task,
         history_task,
         risk_task,
         auction_task,
@@ -69,6 +71,7 @@ async def lifespan(app: FastAPI):
         poll_task,
         alert_task,
         fund_task,
+        gene_task,
         history_task,
         risk_task,
         auction_task,
@@ -105,7 +108,7 @@ async def health():
 
 @app.get("/api/market")
 async def get_market():
-    return market_service.snapshot
+    return market_service.public_snapshot_dict()
 
 
 @app.get("/api/stocks/search")
@@ -114,6 +117,12 @@ async def stock_search(q: str = "", limit: int = 12):
     if not q:
         return {"items": []}
     items = await market_service.client.search_stocks(q, limit=limit)
+    if not market_service._show_st_enabled():
+        items = [
+            x
+            for x in (items or [])
+            if not market_service._stock_is_st(str((x or {}).get("name") or ""))
+        ]
     return {"items": items}
 
 
@@ -165,6 +174,20 @@ async def auction_prev_ladder():
     """昨日涨停股今日竞价涨幅（按连板分组）。"""
     try:
         return await market_service.get_auction_prev_ladder()
+    except Exception as e:
+        return {
+            "phase": "idle",
+            "groups": [],
+            "error": str(e),
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+
+
+@app.post("/api/auction/prev-ladder/refresh")
+async def auction_prev_ladder_refresh():
+    """手动强制刷新昨日连板竞价（竞价中同步重采观察池）。"""
+    try:
+        return await market_service.force_refresh_auction_prev_ladder()
     except Exception as e:
         return {
             "phase": "idle",
@@ -314,7 +337,8 @@ async def stock_trends(code: str, date: str = ""):
 @app.get("/api/stock/{code}/kline")
 async def stock_kline(code: str, limit: int = 120):
     code = code.zfill(6)
-    key = f"kline:{code}:{limit}"
+    # v2：成交量统一为股（东财/腾讯历史 K 原为手）
+    key = f"kline:v2:{code}:{limit}"
     hit = await ttl_cache.get(key)
     if hit and isinstance(hit, dict) and hit.get("bars") is not None and not _kline_cache_stale(hit):
         hit = dict(hit)
@@ -376,7 +400,16 @@ async def put_fields(fields: FieldConfig):
         )
     except Exception:
         fields.auction_poll_interval_sec = 1.0
+    fields.speed_table_columns = normalize_speed_table_columns(
+        fields.speed_table_columns
+    )
+    fields.show_st_stocks = fields.show_st_stocks is not False
     cfg = update_field_config(fields)
+    # ST 开关变更后立即按新规则推送一版快照
+    try:
+        await market_service._broadcast()
+    except Exception:
+        pass
     return cfg.model_dump()
 
 

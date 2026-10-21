@@ -6,7 +6,7 @@ from pathlib import Path
 import aiosqlite
 
 from .config import settings
-from .models import FieldConfig, UserConfig
+from .models import FieldConfig, UserConfig, normalize_speed_table_columns
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS zt_history (
@@ -30,9 +30,18 @@ CREATE TABLE IF NOT EXISTS stock_fundamentals (
     float_mv REAL,
     free_float_mv REAL,
     top10_holder_pct REAL,
+    top10_major_holder_pct REAL,
     top10_holders TEXT,
     top10_holders_date TEXT,
     former_names TEXT,
+    updated_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS stock_gene_stats (
+    code TEXT PRIMARY KEY,
+    zt_success_rate REAL,
+    first_seal_rate REAL,
+    next_red_rate REAL,
     updated_at TEXT
 );
 
@@ -95,6 +104,7 @@ async def init_db() -> None:
             ("top10_holders", "TEXT"),
             ("top10_holders_date", "TEXT"),
             ("former_names", "TEXT"),
+            ("top10_major_holder_pct", "REAL"),
         ]:
             if col not in cols:
                 alters.append(f"ALTER TABLE stock_fundamentals ADD COLUMN {col} {typ}")
@@ -547,10 +557,10 @@ async def upsert_fundamentals(code: str, payload: dict) -> None:
             """
             INSERT INTO stock_fundamentals(
                 code, name, region, industry, concepts, price, total_mv, float_mv,
-                free_float_mv, top10_holder_pct, top10_holders, top10_holders_date,
-                former_names, updated_at
+                free_float_mv, top10_holder_pct, top10_major_holder_pct,
+                top10_holders, top10_holders_date, former_names, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(code) DO UPDATE SET
                 name=excluded.name,
                 region=excluded.region,
@@ -561,6 +571,7 @@ async def upsert_fundamentals(code: str, payload: dict) -> None:
                 float_mv=excluded.float_mv,
                 free_float_mv=excluded.free_float_mv,
                 top10_holder_pct=excluded.top10_holder_pct,
+                top10_major_holder_pct=excluded.top10_major_holder_pct,
                 top10_holders=excluded.top10_holders,
                 top10_holders_date=excluded.top10_holders_date,
                 former_names=excluded.former_names,
@@ -577,9 +588,74 @@ async def upsert_fundamentals(code: str, payload: dict) -> None:
                 payload.get("float_mv"),
                 payload.get("free_float_mv"),
                 payload.get("top10_holder_pct"),
+                payload.get("top10_major_holder_pct"),
                 holders_json,
                 payload.get("top10_holders_date") or "",
                 former_json,
+                payload.get("updated_at"),
+            ),
+        )
+        await db.commit()
+
+
+async def get_gene_stats_batch(codes: list[str]) -> dict[str, dict]:
+    """批量读涨停基因三率（涨速榜慢字段）。"""
+    uniq: list[str] = []
+    seen: set[str] = set()
+    for c in codes:
+        code = str(c or "").zfill(6)
+        if code.isdigit() and code not in seen:
+            seen.add(code)
+            uniq.append(code)
+    if not uniq:
+        return {}
+    out: dict[str, dict] = {}
+    async with aiosqlite.connect(settings.db_path) as db:
+        db.row_factory = aiosqlite.Row
+        for i in range(0, len(uniq), 400):
+            chunk = uniq[i : i + 400]
+            placeholders = ",".join("?" for _ in chunk)
+            cur = await db.execute(
+                f"SELECT * FROM stock_gene_stats WHERE code IN ({placeholders})",
+                chunk,
+            )
+            for row in await cur.fetchall():
+                data = dict(row)
+                out[str(data.get("code") or "").zfill(6)] = data
+    return out
+
+
+async def get_gene_stats(code: str) -> dict | None:
+    code = str(code or "").zfill(6)
+    async with aiosqlite.connect(settings.db_path) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM stock_gene_stats WHERE code = ?", (code,)
+        )
+        row = await cur.fetchone()
+    return dict(row) if row else None
+
+
+async def upsert_gene_stats(code: str, payload: dict) -> None:
+    code = str(code or "").zfill(6)
+    async with aiosqlite.connect(settings.db_path) as db:
+        await db.execute(
+            """
+            INSERT INTO stock_gene_stats(
+                code, zt_success_rate, first_seal_rate, next_red_rate, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(code) DO UPDATE SET
+                zt_success_rate=excluded.zt_success_rate,
+                first_seal_rate=excluded.first_seal_rate,
+                next_red_rate=excluded.next_red_rate,
+                updated_at=excluded.updated_at
+            """,
+            (
+                code,
+                payload.get("zt_success_rate"),
+                payload.get("first_seal_rate"),
+                payload.get("next_red_rate"),
                 payload.get("updated_at"),
             ),
         )
@@ -590,15 +666,25 @@ def load_user_config() -> UserConfig:
     path: Path = settings.config_path
     if not path.exists():
         cfg = UserConfig()
+        cfg.fields.speed_table_columns = normalize_speed_table_columns(
+            cfg.fields.speed_table_columns
+        )
         save_user_config(cfg)
         return cfg
     try:
-        return UserConfig.model_validate_json(path.read_text(encoding="utf-8"))
+        cfg = UserConfig.model_validate_json(path.read_text(encoding="utf-8"))
     except Exception:
-        return UserConfig()
+        cfg = UserConfig()
+    cfg.fields.speed_table_columns = normalize_speed_table_columns(
+        cfg.fields.speed_table_columns
+    )
+    return cfg
 
 
 def save_user_config(cfg: UserConfig) -> None:
+    cfg.fields.speed_table_columns = normalize_speed_table_columns(
+        cfg.fields.speed_table_columns
+    )
     settings.config_path.write_text(
         cfg.model_dump_json(indent=2),
         encoding="utf-8",
@@ -606,6 +692,9 @@ def save_user_config(cfg: UserConfig) -> None:
 
 
 def update_field_config(fields: FieldConfig) -> UserConfig:
+    fields.speed_table_columns = normalize_speed_table_columns(
+        fields.speed_table_columns
+    )
     cfg = load_user_config()
     cfg.fields = fields
     save_user_config(cfg)

@@ -13,22 +13,37 @@ import type { StockItem } from "../types";
 import { formatMoney, formatPct, formatVolume } from "../types";
 import { RiskBadge } from "./RiskPanel";
 
+function NameBoardMarks({ stock }: { stock: StockItem }) {
+  const board = Number(stock.board_count || 0);
+  const showBoard = board >= 2;
+  const showBroken = stock.status === "炸";
+  if (!showBoard && !showBroken) return null;
+  return (
+    <span className="name-board-marks" title={showBroken ? "炸板" : `${board}板`}>
+      {showBoard ? <span className="name-board-n">{board}</span> : null}
+      {showBroken ? <span className="name-board-zb">炸</span> : null}
+    </span>
+  );
+}
+
 function buildColumns(
   keys: string[],
   onOpenChart?: (s: StockItem) => void,
   extraActions?: (s: StockItem) => ReactNode,
+  showNameBoardMarks = false,
 ): ColumnsType<StockItem> {
   const ALL: Record<string, ColumnsType<StockItem>[number]> = {
     name: {
       title: "名称",
       dataIndex: "name",
-      width: extraActions ? 196 : 168,
+      width: showNameBoardMarks ? (extraActions ? 220 : 196) : extraActions ? 196 : 168,
       fixed: "left",
       render: (_, r) => (
         <div className={`name-cell${extraActions ? " name-cell-actions" : ""}`}>
           <div className="name-row">
             <span className="mkt">{r.market}</span>
             <span className="nm">{r.name}</span>
+            {showNameBoardMarks ? <NameBoardMarks stock={r} /> : null}
             {extraActions ? (
               <span
                 className="name-extra"
@@ -164,6 +179,30 @@ function buildColumns(
       width: 110,
       render: (v: number | null) => formatPct(v),
     },
+    top10_major_holder_pct: {
+      title: "持股≥5%占比",
+      dataIndex: "top10_major_holder_pct",
+      width: 110,
+      render: (v: number | null | undefined) => formatPct(v ?? null),
+    },
+    zt_success_rate: {
+      title: "涨停成功率",
+      dataIndex: "zt_success_rate",
+      width: 100,
+      render: (v: number | null | undefined) => formatPct(v ?? null),
+    },
+    first_seal_rate: {
+      title: "首板封板率",
+      dataIndex: "first_seal_rate",
+      width: 100,
+      render: (v: number | null | undefined) => formatPct(v ?? null),
+    },
+    next_red_rate: {
+      title: "次日红盘率",
+      dataIndex: "next_red_rate",
+      width: 100,
+      render: (v: number | null | undefined) => formatPct(v ?? null),
+    },
     year_seal_rate: {
       title: "近一年封板率",
       dataIndex: "year_seal_rate",
@@ -218,6 +257,7 @@ export function MonitorTable({
   preserveScroll = false,
   selectedRowKeys,
   onSelectedRowKeysChange,
+  showNameBoardMarks = false,
 }: {
   data: StockItem[];
   columns: string[];
@@ -232,10 +272,12 @@ export function MonitorTable({
   /** 多选行（如涨速榜加入异动播报） */
   selectedRowKeys?: string[];
   onSelectedRowKeysChange?: (keys: string[]) => void;
+  /** 名称后展示板数 / 炸（涨速榜） */
+  showNameBoardMarks?: boolean;
 }) {
   const cols = useMemo(
-    () => buildColumns(columns, onOpenChart, extraActions),
-    [columns, onOpenChart, extraActions],
+    () => buildColumns(columns, onOpenChart, extraActions, showNameBoardMarks),
+    [columns, onOpenChart, extraActions, showNameBoardMarks],
   );
   const scrollX = useMemo(() => {
     const sum = cols.reduce((acc, c) => {

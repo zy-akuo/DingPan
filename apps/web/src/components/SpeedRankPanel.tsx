@@ -12,9 +12,16 @@ import {
   type BoardBucket,
 } from "../lib/boardBucket";
 import { mergeRows, quoteListSignature } from "../lib/stockRows";
+import { filterStItems } from "../lib/stStock";
 import { loadAlertlist, saveAlertlist } from "../lib/watchlist";
 import type { StockItem } from "../types";
 import { MonitorTable } from "./MonitorTable";
+import {
+  applySpeedFilter,
+  EMPTY_SPEED_FILTER,
+  SpeedFilterBar,
+  type SpeedFilter,
+} from "./SpeedFilterBar";
 import { StockChartModal } from "./StockChartModal";
 
 const SPEED_LIMIT = 50;
@@ -24,15 +31,18 @@ export function SpeedRankPanel({
   onRowClick,
   selectedCode,
   pollSec = 1.5,
+  showStStocks = true,
 }: {
   columns: string[];
   onRowClick: (s: StockItem) => void;
   selectedCode?: string | null;
   pollSec?: number;
+  showStStocks?: boolean;
 }) {
   const [board, setBoard] = useState<BoardBucket>("main");
   const [rows, setRows] = useState<StockItem[]>([]);
   const [kw, setKw] = useState("");
+  const [filter, setFilter] = useState<SpeedFilter>(EMPTY_SPEED_FILTER);
   const [updated, setUpdated] = useState("");
   const [chartStock, setChartStock] = useState<StockItem | null>(null);
   const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
@@ -77,18 +87,21 @@ export function SpeedRankPanel({
         }
         return;
       }
-      const sig = quoteListSignature(items);
-      if (sig !== sigRef.current) {
-        sigRef.current = sig;
-        startTransition(() => {
-          setRows((prev) => {
-            const merged = mergeRows(prev, items, { keepOnEmpty: true });
-            return [...merged]
-              .filter((s) => Number(s.speed ?? 0) > 0)
-              .sort((a, b) => Number(b.speed ?? 0) - Number(a.speed ?? 0));
-          });
+      // 始终 merge：慢字段可能在行情不变时由后台补齐
+      startTransition(() => {
+        setRows((prev) => {
+          const merged = mergeRows(prev, items, { keepOnEmpty: true });
+          const next = [...merged]
+            .filter((s) => Number(s.speed ?? 0) > 0)
+            .sort((a, b) => Number(b.speed ?? 0) - Number(a.speed ?? 0));
+          const sig = quoteListSignature(next);
+          if (sig === sigRef.current && next.every((r, i) => r === prev[i])) {
+            return prev;
+          }
+          sigRef.current = sig;
+          return next;
         });
-      }
+      });
       if (data.updated_at && my === seq.current) {
         setUpdated(data.updated_at.slice(11));
       }
@@ -114,27 +127,22 @@ export function SpeedRankPanel({
     };
   }, [pollSec, refresh, board]);
 
-  const displayCols = useMemo(() => {
-    if (columns.includes("speed")) return columns;
-    const idx = columns.indexOf("name");
-    if (idx >= 0) {
-      const next = [...columns];
-      next.splice(idx + 1, 0, "speed");
-      return next;
-    }
-    return ["speed", ...columns];
-  }, [columns]);
+  const baseRows = useMemo(
+    () => filterStItems(rows, showStStocks),
+    [rows, showStStocks],
+  );
 
   const filtered = useMemo(() => {
     const q = kw.trim().toLowerCase();
-    const next = !q
-      ? rows
-      : rows.filter(
+    const byKw = !q
+      ? baseRows
+      : baseRows.filter(
           (s) =>
             s.code.includes(q) ||
             (s.name || "").toLowerCase().includes(q) ||
             (s.industry || "").toLowerCase().includes(q),
         );
+    const next = applySpeedFilter(byKw, filter);
     if (
       filteredRef.current.length === next.length &&
       next.every((r, i) => r === filteredRef.current[i])
@@ -143,7 +151,7 @@ export function SpeedRankPanel({
     }
     filteredRef.current = next;
     return next;
-  }, [rows, kw]);
+  }, [baseRows, kw, filter]);
 
   const addToAlert = useCallback(async () => {
     if (!selectedKeys.length || adding) return;
@@ -204,15 +212,22 @@ export function SpeedRankPanel({
           <span className="muted"> · 涨速降序 · 已隐藏涨停/负涨速</span>
         </span>
       </div>
+      <SpeedFilterBar
+        value={filter}
+        onChange={setFilter}
+        resultCount={filtered.length}
+        totalCount={baseRows.length}
+      />
       <MonitorTable
         data={filtered}
-        columns={displayCols}
+        columns={columns}
         onRowClick={onRowClick}
         selectedCode={selectedCode}
         onOpenChart={setChartStock}
         preserveScroll
         selectedRowKeys={selectedKeys}
         onSelectedRowKeysChange={setSelectedKeys}
+        showNameBoardMarks
       />
       <StockChartModal
         stock={chartStock}

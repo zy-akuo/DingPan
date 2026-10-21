@@ -1070,7 +1070,9 @@ class EastMoneyClient:
             parts = str(line).split(",")
             if len(parts) < 6:
                 continue
-            # 东财日K: 日期,开,收,高,低,量,额,振幅%,涨跌幅%,涨跌额,换手%
+            # 东财日K: 日期,开,收,高,低,量(手),额,振幅%,涨跌幅%,涨跌额,换手%
+            # 统一成交量为「股」，与腾讯实时行情 / 今日补 K 一致，避免量柱 Y 轴被撑开后历史柱不可见
+            vol_hands = float(parts[5] or 0)
             bars.append(
                 {
                     "date": parts[0],
@@ -1078,7 +1080,7 @@ class EastMoneyClient:
                     "close": float(parts[2] or 0),
                     "high": float(parts[3] or 0),
                     "low": float(parts[4] or 0),
-                    "volume": float(parts[5] or 0),
+                    "volume": vol_hands * 100.0,
                     "amount": float(parts[6] or 0) if len(parts) > 6 and parts[6] not in ("", "-") else None,
                     "amplitude": float(parts[7] or 0) if len(parts) > 7 and parts[7] not in ("", "-") else None,
                     "pct": float(parts[8] or 0) if len(parts) > 8 else 0,
@@ -1255,7 +1257,8 @@ class EastMoneyClient:
         for row in rows:
             if not isinstance(row, list) or len(row) < 5:
                 continue
-            # date, open, close, high, low, volume
+            # date, open, close, high, low, volume(手) → 统一为股
+            vol_hands = float(row[5] or 0) if len(row) > 5 else 0.0
             bars.append(
                 {
                     "date": str(row[0]),
@@ -1263,7 +1266,7 @@ class EastMoneyClient:
                     "close": float(row[2] or 0),
                     "high": float(row[3] or 0),
                     "low": float(row[4] or 0),
-                    "volume": float(row[5] or 0) if len(row) > 5 else 0,
+                    "volume": vol_hands * 100.0,
                     "amount": None,
                     "amplitude": None,
                     "pct": 0.0,
@@ -1825,6 +1828,7 @@ class EastMoneyClient:
             "float_mv": float_mv,
             "free_float_mv": free_float_mv,
             "top10_holder_pct": holders_pct,
+            "top10_major_holder_pct": round(maj_pct, 2) if maj_pct else 0.0,
             "top10_holders": holders_list,
             "top10_holders_date": holders_end,
             "former_names": former_names,

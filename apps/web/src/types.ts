@@ -26,6 +26,8 @@ export interface StockItem {
   region: string;
   free_float_mv: number | null;
   top10_holder_pct: number | null;
+  /** 十大股东中持股≥5% 合计占比 */
+  top10_major_holder_pct?: number | null;
   /** 十大股东明细（详情抽屉） */
   top10_holders?: TopHolder[];
   /** 十大股东报告期 */
@@ -34,6 +36,12 @@ export interface StockItem {
   former_names?: string[];
   year_seal_rate: number | null;
   year_board_rate: number | null;
+  /** 涨停成功率 % */
+  zt_success_rate?: number | null;
+  /** 首板封板率 % */
+  first_seal_rate?: number | null;
+  /** 次日红盘率 % */
+  next_red_rate?: number | null;
   /** 涨速 % */
   speed?: number | null;
   /** 异动原因 */
@@ -166,9 +174,47 @@ export const DEFAULT_ALERT_SPEECH_TYPES = [
   "zt_smash",
 ] as const;
 
+/** 涨速榜默认列顺序（与后端 DEFAULT_SPEED_TABLE_COLUMNS 对齐） */
+export const DEFAULT_SPEED_TABLE_COLUMNS = [
+  "name",
+  "speed",
+  "amount",
+  "total_mv",
+  "free_float_mv",
+  "price",
+  "change_pct",
+  "concepts",
+  "industry",
+  "region",
+  "zt_success_rate",
+  "first_seal_rate",
+  "next_red_rate",
+  "top10_holder_pct",
+  "top10_major_holder_pct",
+] as const;
+
+export function normalizeSpeedTableColumns(cols?: string[] | null): string[] {
+  const allowed = new Set<string>(DEFAULT_SPEED_TABLE_COLUMNS);
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const k of cols || []) {
+    const key = String(k || "").trim();
+    if (allowed.has(key) && !seen.has(key)) {
+      seen.add(key);
+      out.push(key);
+    }
+  }
+  for (const k of DEFAULT_SPEED_TABLE_COLUMNS) {
+    if (!seen.has(k)) out.push(k);
+  }
+  return out;
+}
+
 export interface FieldConfig {
   table_columns: string[];
   detail_fields: string[];
+  /** 涨速榜专用列顺序 */
+  speed_table_columns?: string[];
   speech_enabled: boolean;
   /** 保留字段；仅支持 realtime 新事件播报 */
   speech_mode?: "realtime";
@@ -181,6 +227,8 @@ export interface FieldConfig {
   auction_poll_interval_sec?: number;
   /** 连板天梯是否展示封板/回封/炸板时间 */
   ladder_show_times?: boolean;
+  /** 是否展示/拉取 ST、*ST、退市股（避雷啦除外） */
+  show_st_stocks?: boolean;
   /** 异动播报总开关 */
   alert_speech_enabled?: boolean;
   /** 异动播报类型 */

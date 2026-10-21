@@ -39,16 +39,41 @@ class StockItem(BaseModel):
     region: str = ""
     free_float_mv: float | None = None
     top10_holder_pct: float | None = None
+    # 十大股东中持股≥5% 合计占比（自由流通剔除口径）
+    top10_major_holder_pct: float | None = None
     top10_holders: list[dict[str, Any]] | None = None
     top10_holders_date: str | None = None
     former_names: list[str] | None = None
     year_seal_rate: float | None = None
     year_board_rate: float | None = None
+    # 涨停基因（与详情雷达同源）
+    zt_success_rate: float | None = None
+    first_seal_rate: float | None = None
+    next_red_rate: float | None = None
     speed: float | None = None  # 涨速 %
     reason: str = ""  # 异动原因（涨停概念/题材）
     # 避雷啦 / 风险警示：st=其他风险警示, delist=退市风险(*ST), warn=潜在风险
     risk_tags: list[str] = Field(default_factory=list)
     risk_hint: str = ""
+
+
+DEFAULT_SPEED_TABLE_COLUMNS: list[str] = [
+    "name",
+    "speed",
+    "amount",
+    "total_mv",
+    "free_float_mv",
+    "price",
+    "change_pct",
+    "concepts",
+    "industry",
+    "region",
+    "zt_success_rate",
+    "first_seal_rate",
+    "next_red_rate",
+    "top10_holder_pct",
+    "top10_major_holder_pct",
+]
 
 
 class HistoryGroup(BaseModel):
@@ -157,6 +182,10 @@ class FieldConfig(BaseModel):
             "industry",
         ]
     )
+    # 涨速榜专用列顺序（与监控表 table_columns 独立）
+    speed_table_columns: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_SPEED_TABLE_COLUMNS)
+    )
     speech_enabled: bool = False
     speech_mode: str = "realtime"  # 仅 realtime
     speech_types: list[str] = Field(default_factory=lambda: ["zt", "lb", "zb"])
@@ -168,6 +197,8 @@ class FieldConfig(BaseModel):
     auction_poll_interval_sec: float = 1.0
     # 连板天梯是否展示封板/回封/炸板时间
     ladder_show_times: bool = True
+    # 是否展示/拉取 ST、*ST、退市股（避雷啦面板除外）
+    show_st_stocks: bool = True
     # 异动播报（独立于普通涨停/连板/炸板语音）
     alert_speech_enabled: bool = True
     alert_speech_types: list[str] = Field(
@@ -196,6 +227,10 @@ AVAILABLE_FIELDS: dict[str, str] = {
     "industry": "行业",
     "region": "地域",
     "top10_holder_pct": "十大股东持股占比",
+    "top10_major_holder_pct": "十大股东持股≥5%占比",
+    "zt_success_rate": "涨停成功率",
+    "first_seal_rate": "首板封板率",
+    "next_red_rate": "次日红盘率",
     "year_seal_rate": "近一年封板率",
     "year_board_rate": "近一年连板率",
     "turnover": "换手率",
@@ -203,6 +238,22 @@ AVAILABLE_FIELDS: dict[str, str] = {
     "reason": "异动原因",
     "last_seal_time": "末封",
 }
+
+
+def normalize_speed_table_columns(cols: list[str] | None) -> list[str]:
+    """校验涨速榜列：固定 15 列全集，仅允许调整顺序。"""
+    allowed = set(DEFAULT_SPEED_TABLE_COLUMNS)
+    seen: set[str] = set()
+    out: list[str] = []
+    for k in cols or []:
+        key = str(k or "").strip()
+        if key in allowed and key not in seen:
+            seen.add(key)
+            out.append(key)
+    for k in DEFAULT_SPEED_TABLE_COLUMNS:
+        if k not in seen:
+            out.append(k)
+    return out
 
 
 class UserConfig(BaseModel):

@@ -967,7 +967,7 @@ export function StockChartModal({
             setError(`暂无 ${focusDay.slice(0, 4)}-${focusDay.slice(4, 6)}-${focusDay.slice(6, 8)} 分时数据`);
           }
         } else {
-          const ckey = `kline:v3:${stock.code}:${KLINE_LIMIT}`;
+          const ckey = `kline:v4:${stock.code}:${KLINE_LIMIT}`;
           const cached = cacheGet<KBar[]>(ckey);
           if (cached?.length && (focusDay || klineCacheFresh(cached))) {
             setKlines(cached);

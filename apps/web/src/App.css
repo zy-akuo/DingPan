@@ -250,6 +250,39 @@ body {
   white-space: nowrap;
 }
 
+.name-board-marks {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  margin-right: 2px;
+  line-height: 1;
+}
+
+.name-board-n,
+.name-board-zb {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 14px;
+  height: 16px;
+  padding: 0 3px;
+  border-radius: 3px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.name-board-n {
+  color: #c41d7f;
+  background: rgba(196, 29, 127, 0.12);
+}
+
+.name-board-zb {
+  color: #d48806;
+  background: rgba(212, 136, 6, 0.16);
+}
+
 .name-chart-btn {
   color: var(--link) !important;
   padding: 0 4px !important;
@@ -1005,6 +1038,29 @@ body {
   margin: 0 0 10px;
 }
 
+.speed-col-order {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 320px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.speed-col-order-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border, rgba(127, 127, 127, 0.2));
+}
+
+.speed-col-order-label {
+  font-size: 13px;
+  line-height: 1.4;
+}
+
 .ladder-panel {
   padding: 12px 16px 20px;
   background: var(--panel);
@@ -1328,6 +1384,54 @@ body {
   font-size: 12px;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
+}
+
+.speed-tpl-dropdown .ant-dropdown-menu-item {
+  max-width: 420px;
+}
+
+.speed-tpl-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 220px;
+}
+
+.speed-tpl-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.speed-tpl-name {
+  font-size: 13px;
+  color: var(--text);
+  line-height: 1.3;
+  word-break: break-all;
+}
+
+.speed-tpl-summary {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.35;
+  word-break: break-all;
+}
+
+.speed-tpl-del {
+  flex-shrink: 0;
+  padding: 0 4px !important;
+  height: auto !important;
+}
+
+.speed-tpl-save {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.speed-tpl-save-hint {
+  font-size: 13px;
+  color: var(--muted);
 }
 
 /* 高轮询榜单/观察列表：减少滚动锚定跳动，数字等宽避免列宽抖 */

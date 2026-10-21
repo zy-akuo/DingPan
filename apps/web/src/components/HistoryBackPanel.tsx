@@ -27,6 +27,7 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { matchNameOrInitials } from "../lib/stockMatch";
+import { filterStItems, isStLikeName } from "../lib/stStock";
 import type {
   HistoryGroup,
   HistorySnapshot,
@@ -193,12 +194,14 @@ export function HistoryBackPanel({
   selectedCode,
   date,
   onDateChange,
+  showStStocks = true,
 }: {
   columns: string[];
   onRowClick: (s: StockItem) => void;
   selectedCode?: string | null;
   date: string;
   onDateChange: (ymd: string) => void;
+  showStStocks?: boolean;
 }) {
   const [mode, setMode] = useState<ViewMode>("ladder");
   const [nameKw, setNameKw] = useState("");
@@ -312,6 +315,24 @@ export function HistoryBackPanel({
     [kw],
   );
 
+  const viewData = useMemo(() => {
+    if (!data || showStStocks) return data;
+    const mapGroups = (groups: HistoryGroup[]) =>
+      (groups || []).map((g) => {
+        const stocks = filterStItems(g.stocks || [], false);
+        return { ...g, stocks, count: stocks.length };
+      });
+    const items = filterStItems(data.items || [], false);
+    return {
+      ...data,
+      items,
+      count: items.length,
+      zt_count: items.length,
+      concept_groups: mapGroups(data.concept_groups || []),
+      board_groups: mapGroups(data.board_groups || []),
+    };
+  }, [data, showStStocks]);
+
   const nameSearching = !!nameKw.trim();
   const nameHitCodes = useMemo(() => {
     const q = nameKw.trim();
@@ -322,16 +343,16 @@ export function HistoryBackPanel({
         if (matchNameOrInitials(s.name || "", q)) set.add(s.code);
       }
     };
-    for (const g of data?.board_groups || []) push(g.stocks || []);
-    for (const g of data?.concept_groups || []) push(g.stocks || []);
-    for (const s of data?.items || []) {
+    for (const g of viewData?.board_groups || []) push(g.stocks || []);
+    for (const g of viewData?.concept_groups || []) push(g.stocks || []);
+    for (const s of viewData?.items || []) {
       if (matchNameOrInitials(s.name || "", q)) set.add(s.code);
     }
     return set;
-  }, [data, nameKw]);
+  }, [viewData, nameKw]);
 
   const conceptGroups = useMemo(() => {
-    const raw = data?.concept_groups || [];
+    const raw = viewData?.concept_groups || [];
     if (!kw.trim()) return raw;
     return raw
       .map((g) => {
@@ -340,10 +361,10 @@ export function HistoryBackPanel({
         return { ...g, stocks, count: stocks.length };
       })
       .filter(Boolean) as HistoryGroup[];
-  }, [data, kw, filterByReason]);
+  }, [viewData, kw, filterByReason]);
 
   const boardGroups = useMemo(() => {
-    const raw = data?.board_groups || [];
+    const raw = viewData?.board_groups || [];
     return raw
       .map((g) => {
         let stocks = (g.stocks || []).filter(filterByReason);
@@ -358,11 +379,11 @@ export function HistoryBackPanel({
         return { ...g, stocks, count: stocks.length };
       })
       .filter(Boolean) as HistoryGroup[];
-  }, [data, kw, filterByReason, activeConcept]);
+  }, [viewData, kw, filterByReason, activeConcept]);
 
   const dateLabel = tradeDateLabel(date);
   const canNext = dateValue.isBefore(dayjs(), "day");
-  const ztCount = data?.zt_count ?? data?.count ?? 0;
+  const ztCount = viewData?.zt_count ?? viewData?.count ?? 0;
   const highlighting = !!highlightCode;
   const ladderSearching = highlighting || nameSearching;
 
@@ -522,8 +543,11 @@ export function HistoryBackPanel({
         );
         if (!res.ok) return;
         const payload = (await res.json()) as { items: StockSuggest[] };
+        const items = (payload.items || []).filter(
+          (it) => showStStocks || !isStLikeName(it.name),
+        );
         setStockOptions(
-          (payload.items || []).map((it) => ({
+          items.map((it) => ({
             value: `${it.code} ${it.name}`,
             label: `${it.market || ""} ${it.code} ${it.name}`.trim(),
             item: it,
@@ -533,7 +557,7 @@ export function HistoryBackPanel({
         setStockOptions([]);
       }
     }, 220);
-  }, []);
+  }, [showStStocks]);
 
   useEffect(() => {
     return () => {
@@ -769,7 +793,7 @@ export function HistoryBackPanel({
       ) : null}
 
       <Spin spinning={loading}>
-        {!loading && !(data?.count || 0) ? (
+        {!loading && !(viewData?.count || 0) ? (
           <Empty
             style={{ marginTop: 48 }}
             description={data?.error || "该日暂无涨停数据（或非交易日）"}

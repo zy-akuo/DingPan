@@ -11,6 +11,8 @@ from ..db import (
     count_history_dates,
     get_fundamentals,
     get_fundamentals_batch,
+    get_gene_stats,
+    get_gene_stats_batch,
     get_meta,
     delete_zt_history_dates,
     list_zt_history_by_code,
@@ -26,6 +28,7 @@ from ..db import (
     search_local_stocks,
     set_meta,
     upsert_fundamentals,
+    upsert_gene_stats,
     upsert_risk_events,
     upsert_zt_history,
 )
@@ -158,6 +161,28 @@ def _free_float_looks_wrong(fund: dict[str, Any] | None) -> bool:
         return False
 
 
+def _fund_major_holder_pct(fund: dict[str, Any] | None) -> float | None:
+    if not fund:
+        return None
+    if fund.get("top10_major_holder_pct") is not None:
+        try:
+            return float(fund["top10_major_holder_pct"])
+        except (TypeError, ValueError):
+            pass
+    holders = fund.get("top10_holders") or []
+    if not isinstance(holders, list) or not holders:
+        return None
+    maj = 0.0
+    for h in holders:
+        try:
+            r = float((h or {}).get("ratio") or 0)
+        except (TypeError, ValueError):
+            continue
+        if r >= 5.0:
+            maj += r
+    return round(maj, 2)
+
+
 def _fund_list_complete(fund: dict[str, Any] | None) -> bool:
     """列表展示所需字段是否齐全（地域 / 自由流通 / 十大股东）。"""
     if not fund:
@@ -169,6 +194,8 @@ def _fund_list_complete(fund: dict[str, Any] | None) -> bool:
     if _free_float_looks_wrong(fund):
         return False
     if fund.get("top10_holder_pct") is None:
+        return False
+    if _fund_major_holder_pct(fund) is None:
         return False
     return True
 
@@ -187,12 +214,46 @@ def _apply_fund_fields(stock: StockItem, fund: dict[str, Any]) -> None:
         stock.free_float_mv = fund["free_float_mv"]
     if fund.get("top10_holder_pct") is not None:
         stock.top10_holder_pct = fund["top10_holder_pct"]
+    major = fund.get("top10_major_holder_pct")
+    if major is None:
+        holders = fund.get("top10_holders") or []
+        if isinstance(holders, list) and holders:
+            maj = 0.0
+            for h in holders:
+                try:
+                    r = float((h or {}).get("ratio") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if r >= 5.0:
+                    maj += r
+            major = round(maj, 2)
+    if major is not None:
+        stock.top10_major_holder_pct = major
     if fund.get("price"):
         stock.price = fund["price"] or stock.price
     if fund.get("total_mv"):
         stock.total_mv = fund["total_mv"] or stock.total_mv
     if fund.get("float_mv"):
         stock.float_mv = fund["float_mv"] or stock.float_mv
+
+
+def _apply_gene_fields(stock: StockItem, gene: dict[str, Any]) -> None:
+    if gene.get("zt_success_rate") is not None:
+        stock.zt_success_rate = gene["zt_success_rate"]
+    if gene.get("first_seal_rate") is not None:
+        stock.first_seal_rate = gene["first_seal_rate"]
+    if gene.get("next_red_rate") is not None:
+        stock.next_red_rate = gene["next_red_rate"]
+
+
+def _gene_list_complete(gene: dict[str, Any] | None) -> bool:
+    if not gene:
+        return False
+    return (
+        gene.get("zt_success_rate") is not None
+        or gene.get("first_seal_rate") is not None
+        or gene.get("next_red_rate") is not None
+    )
 
 
 class MarketService:
@@ -211,6 +272,12 @@ class MarketService:
         self._fund_inflight: set[str] = set()
         self._fund_complete: set[str] = set()
         self._fund_retry_at: dict[str, float] = {}
+        # 涨停基因三率：涨速榜慢字段异步补齐
+        self._gene_queue: asyncio.Queue[str] = asyncio.Queue()
+        self._gene_inflight: set[str] = set()
+        self._gene_complete: set[str] = set()
+        self._gene_retry_at: dict[str, float] = {}
+        self._ths = None  # lazy ThsClient
         self._y_zt: list[dict[str, Any]] = []
         self._y_zb_count = 0
         self._y_dt_count = 0
@@ -257,7 +324,7 @@ class MarketService:
             self._listeners.remove(q)
 
     async def _broadcast(self) -> None:
-        payload = self.snapshot.model_dump()
+        payload = self.public_snapshot_dict()
         dead: list[asyncio.Queue] = []
         for q in self._listeners:
             try:
@@ -271,6 +338,182 @@ class MarketService:
                 dead.append(q)
         for q in dead:
             self.unsubscribe(q)
+
+    @staticmethod
+    def _show_st_enabled() -> bool:
+        try:
+            from ..db import load_user_config
+
+            return getattr(load_user_config().fields, "show_st_stocks", True) is not False
+        except Exception:
+            return True
+
+    @staticmethod
+    def _stock_is_st(
+        name: str = "",
+        risk_tags: list[Any] | None = None,
+    ) -> bool:
+        if MarketService._is_st_like_name(name):
+            return True
+        tags = risk_tags or []
+        return any(t in ("st", "delist") for t in tags)
+
+    def filter_st_stocks(self, items: list[StockItem]) -> list[StockItem]:
+        """按设置剔除 ST/*ST/退市股。"""
+        if self._show_st_enabled() or not items:
+            return items
+        return [
+            s
+            for s in items
+            if not self._stock_is_st(s.name, list(s.risk_tags or []))
+        ]
+
+    def filter_st_dicts(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if self._show_st_enabled() or not rows:
+            return rows
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            name = str(r.get("name") or "")
+            tags = r.get("risk_tags")
+            if not isinstance(tags, list):
+                tags = []
+            if self._stock_is_st(name, tags):
+                continue
+            out.append(r)
+        return out
+
+    def filter_st_history_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """历史回溯：剔除 ST 后重算分组计数。"""
+        if self._show_st_enabled() or not payload:
+            return payload
+        data = dict(payload)
+        items = self.filter_st_dicts(list(data.get("items") or []))
+        data["items"] = items
+        data["count"] = len(items)
+        if "zt_count" in data:
+            data["zt_count"] = len(items)
+
+        def _filter_groups(groups: list[Any]) -> list[dict[str, Any]]:
+            out: list[dict[str, Any]] = []
+            for g in groups or []:
+                if not isinstance(g, dict):
+                    continue
+                stocks = self.filter_st_dicts(list(g.get("stocks") or []))
+                if not stocks and not (g.get("stocks") or []):
+                    out.append(g)
+                    continue
+                ng = dict(g)
+                ng["stocks"] = stocks
+                ng["count"] = len(stocks)
+                out.append(ng)
+            return out
+
+        data["concept_groups"] = _filter_groups(list(data.get("concept_groups") or []))
+        data["board_groups"] = _filter_groups(list(data.get("board_groups") or []))
+        return data
+
+    def filter_st_auction_board(self, result: dict[str, Any]) -> dict[str, Any]:
+        if self._show_st_enabled() or not result:
+            return result
+        data = dict(result)
+        col = dict(data.get("column") or {})
+        for key in ("yizhi_items", "other_items", "items"):
+            if key in col:
+                col[key] = self.filter_st_dicts(list(col.get(key) or []))
+        if "yizhi_items" in col:
+            col["yizhi_count"] = len(col.get("yizhi_items") or [])
+        if "other_items" in col:
+            col["other_count"] = len(col.get("other_items") or [])
+        data["column"] = col
+        return data
+
+    def filter_st_auction_prev_ladder(self, result: dict[str, Any]) -> dict[str, Any]:
+        if self._show_st_enabled() or not result:
+            return result
+        data = dict(result)
+        groups = []
+        for g in data.get("groups") or []:
+            if not isinstance(g, dict):
+                continue
+            stocks = self.filter_st_dicts(list(g.get("stocks") or []))
+            ng = dict(g)
+            ng["stocks"] = stocks
+            ng["count"] = len(stocks)
+            groups.append(ng)
+        data["groups"] = groups
+        return data
+
+    def public_snapshot_dict(self) -> dict[str, Any]:
+        """对外快照：可选剔除 ST，并重算摘要计数。"""
+        data = self.snapshot.model_dump()
+        if self._show_st_enabled():
+            return data
+
+        def _keep(s: dict[str, Any]) -> bool:
+            return not self._stock_is_st(
+                str(s.get("name") or ""),
+                list(s.get("risk_tags") or [])
+                if isinstance(s.get("risk_tags"), list)
+                else [],
+            )
+
+        zt = [s for s in (data.get("zt") or []) if _keep(s)]
+        lb = [s for s in (data.get("lb") or []) if _keep(s)]
+        zb = [s for s in (data.get("zb") or []) if _keep(s)]
+        dt = [s for s in (data.get("dt") or []) if _keep(s)]
+        ladder = []
+        for g in data.get("ladder") or []:
+            stocks = [s for s in (g.get("stocks") or []) if _keep(s)]
+            ladder.append({**g, "stocks": stocks, "count": len(stocks)})
+        data["zt"] = zt
+        data["lb"] = lb
+        data["zb"] = zb
+        data["dt"] = dt
+        data["ladder"] = ladder
+
+        y_zt = len(self._y_zt)
+        y_lb = sum(1 for r in self._y_zt if int(r.get("board_count") or 1) >= 2)
+        # 昨日池也按设置剔除 ST，避免摘要口径不一致
+        if not self._show_st_enabled():
+            y_rows = [
+                r
+                for r in self._y_zt
+                if not self._is_st_like_name(str(r.get("name") or ""))
+            ]
+            y_zt = len(y_rows)
+            y_lb = sum(1 for r in y_rows if int(r.get("board_count") or 1) >= 2)
+        denom = len(zt) + len(zb)
+        seal_today = round(len(zt) / denom * 100, 1) if denom else 0.0
+        y_zb = int(self._y_zb_count or 0)
+        y_dt = int(self._y_dt_count or 0)
+        y_denom = y_zt + y_zb
+        seal_y = round(y_zt / y_denom * 100, 1) if y_denom else 0.0
+        data["summary"] = {
+            "zt_today": len(zt),
+            "zt_yesterday": y_zt,
+            "lb_today": len(lb),
+            "lb_yesterday": y_lb,
+            "seal_rate_today": seal_today,
+            "seal_rate_yesterday": seal_y,
+            "zb_today": len(zb),
+            "zb_yesterday": y_zb,
+            "dt_today": len(dt),
+            "dt_yesterday": y_dt,
+        }
+
+        def _keep_evt(e: dict[str, Any]) -> bool:
+            return not self._is_st_like_name(str(e.get("name") or ""))
+
+        data["speech_events"] = [
+            e for e in (data.get("speech_events") or []) if _keep_evt(e)
+        ]
+        data["alert_events"] = [
+            e for e in (data.get("alert_events") or []) if _keep_evt(e)
+        ]
+        data["alert_feed"] = [
+            e for e in (data.get("alert_feed") or []) if _keep_evt(e)
+        ]
+        return data
 
     async def _fetch_pools(
         self, ds: str
@@ -655,7 +898,13 @@ class MarketService:
 
         limit = max(1, min(100, int(limit or 50)))
         board = normalize_board_bucket(board)
-        cache_key = f"{board}:{limit}"
+        # 隐藏 ST 时多拉一些，过滤后仍尽量凑满 limit
+        fetch_limit = (
+            limit
+            if self._show_st_enabled()
+            else min(100, max(limit * 2, limit + 30))
+        )
+        cache_key = f"{board}:{fetch_limit}"
         now = datetime.now().timestamp()
         # 略短于常见 1～1.5s 轮询，保证连续两轮能吃到新数据
         ttl = 0.45
@@ -663,80 +912,256 @@ class MarketService:
         cached = self._speed_cache
         if (
             cached
-            and cached[1] == limit
+            and cached[1] == fetch_limit
             and cached[2] == board
             and cached[3]
             and (now - cached[0]) < ttl
         ):
-            return list(cached[3])
+            items = [s.model_copy() for s in cached[3]]
+            return await self._finalize_speed_items(items, limit)
 
         async with self._speed_lock:
             now = datetime.now().timestamp()
             cached = self._speed_cache
             if (
                 cached
-                and cached[1] == limit
+                and cached[1] == fetch_limit
                 and cached[2] == board
                 and cached[3]
                 and (now - cached[0]) < ttl
             ):
-                return list(cached[3])
-            task = self._speed_inflight
-            if (
-                task is None
-                or task.done()
-                or self._speed_inflight_key != cache_key
-            ):
-                async def _load() -> list[StockItem]:
-                    rows = await self.client.fetch_speed_rank(
-                        limit=limit, board=board, exclude_limit_up=True
-                    )
-                    # 再保险：丢弃非正涨速，并按涨速从大到小
-                    rows = sorted(
-                        (
-                            r
-                            for r in rows
-                            if float(r.get("speed") or 0) > 0
-                        ),
-                        key=lambda r: float(r.get("speed") or 0),
-                        reverse=True,
-                    )[:limit]
-                    items: list[StockItem] = []
-                    for r in rows:
-                        s = self._to_stock(r, StockStatus.HOLDING)
-                        items.append(
-                            s.model_copy(update={"board_tag": "", "board_count": 1})
+                hit = list(cached[3])
+                task = None
+            else:
+                hit = None
+                task = self._speed_inflight
+                if (
+                    task is None
+                    or task.done()
+                    or self._speed_inflight_key != cache_key
+                ):
+                    async def _load() -> list[StockItem]:
+                        rows = await self.client.fetch_speed_rank(
+                            limit=fetch_limit, board=board, exclude_limit_up=True
                         )
-                    return items
+                        # 再保险：丢弃非正涨速，并按涨速从大到小
+                        rows = sorted(
+                            (
+                                r
+                                for r in rows
+                                if float(r.get("speed") or 0) > 0
+                            ),
+                            key=lambda r: float(r.get("speed") or 0),
+                            reverse=True,
+                        )[:fetch_limit]
+                        out: list[StockItem] = []
+                        for r in rows:
+                            s = self._to_stock(r, StockStatus.HOLDING)
+                            out.append(
+                                s.model_copy(update={"board_tag": "", "board_count": 1})
+                            )
+                        return out
 
-                task = asyncio.create_task(_load())
-                self._speed_inflight = task
-                self._speed_inflight_key = cache_key
+                    task = asyncio.create_task(_load())
+                    self._speed_inflight = task
+                    self._speed_inflight_key = cache_key
+
+        if hit is not None:
+            items = [s.model_copy() for s in hit]
+            return await self._finalize_speed_items(items, limit)
 
         try:
-            items = await task
+            items = await task  # type: ignore[misc]
         except Exception:
-            if cached and cached[1] == limit and cached[2] == board and cached[3]:
-                return list(cached[3])
+            if cached and cached[1] == fetch_limit and cached[2] == board and cached[3]:
+                stale = [s.model_copy() for s in cached[3]]
+                return await self._finalize_speed_items(stale, limit)
             raise
         finally:
-            if self._speed_inflight is task:
+            if task is not None and self._speed_inflight is task:
                 self._speed_inflight = None
                 self._speed_inflight_key = ""
 
         if items:
-            self._speed_cache = (datetime.now().timestamp(), limit, board, items)
-            return list(items)
+            # 先缓存行情快照，再拷贝合并慢字段，避免缓存被 enrich 污染
+            self._speed_cache = (datetime.now().timestamp(), fetch_limit, board, items)
+            enriched = [s.model_copy() for s in items]
+            return await self._finalize_speed_items(enriched, limit)
         # 空包：若有未过期成功缓存则继续返回，避免前端闪空白
         if (
             cached
-            and cached[1] == limit
+            and cached[1] == fetch_limit
             and cached[2] == board
             and cached[3]
             and (datetime.now().timestamp() - cached[0]) < stale_ttl
         ):
-            return list(cached[3])
+            stale = [s.model_copy() for s in cached[3]]
+            return await self._finalize_speed_items(stale, limit)
         return []
+
+    async def _finalize_speed_items(
+        self, items: list[StockItem], limit: int
+    ) -> list[StockItem]:
+        self._enrich_speed_board_state(items)
+        await self._enrich_speed_slow_fields(items)
+        return self.filter_st_stocks(items)[:limit]
+
+    def _enrich_speed_board_state(self, items: list[StockItem]) -> None:
+        """涨速榜补齐板数 / 炸板：今日涨停池、炸板池优先，否则用昨日连板数。"""
+        if not items:
+            return
+        zt_map: dict[str, StockItem] = {}
+        zb_map: dict[str, StockItem] = {}
+        for s in list(self.snapshot.zt or []) + list(self.snapshot.lb or []):
+            zt_map[s.code] = s
+        for s in list(self.snapshot.zb or []):
+            zb_map[s.code] = s
+        y_map: dict[str, int] = {}
+        for r in self._y_zt or []:
+            code = str(r.get("code") or "").zfill(6)
+            if code.isdigit():
+                y_map[code] = max(1, int(r.get("board_count") or 1))
+
+        for s in items:
+            if s.code in zb_map:
+                src = zb_map[s.code]
+                s.board_count = max(1, int(src.board_count or 1))
+                s.status = StockStatus.BROKEN
+                if src.board_tag:
+                    s.board_tag = src.board_tag
+                if src.break_time:
+                    s.break_time = src.break_time
+                if src.first_seal_time and not s.first_seal_time:
+                    s.first_seal_time = src.first_seal_time
+            elif s.code in zt_map:
+                src = zt_map[s.code]
+                s.board_count = max(1, int(src.board_count or 1))
+                s.status = src.status or StockStatus.SUCCESS
+                s.board_tag = src.board_tag or ""
+                if src.first_seal_time:
+                    s.first_seal_time = src.first_seal_time
+            elif s.code in y_map:
+                s.board_count = y_map[s.code]
+                # 未进今日涨停/炸板池：保留封/持有态，仅带昨日板数供名称角标
+
+    async def _enrich_speed_slow_fields(self, items: list[StockItem]) -> None:
+        """涨速榜慢字段：批量读库合并 + 缺失入队异步补齐（不阻塞热路径打外网）。"""
+        if not items:
+            return
+        codes = [s.code for s in items]
+        try:
+            fund_map = await get_fundamentals_batch(codes)
+        except Exception:
+            fund_map = {}
+        try:
+            gene_map = await get_gene_stats_batch(codes)
+        except Exception:
+            gene_map = {}
+
+        now = datetime.now().timestamp()
+        gene_ttl = 30 * 60 if _is_trading_time() else 2 * 3600
+
+        for s in items:
+            fund = fund_map.get(s.code)
+            if fund:
+                _apply_fund_fields(s, fund)
+                if _fund_list_complete(fund):
+                    self._fund_complete.add(s.code)
+                else:
+                    self._fund_complete.discard(s.code)
+            if (
+                s.code not in self._fund_complete
+                and s.code not in self._fund_inflight
+                and now >= self._fund_retry_at.get(s.code, 0)
+            ):
+                self._fund_inflight.add(s.code)
+                try:
+                    self._fund_queue.put_nowait(s.code)
+                except Exception:
+                    self._fund_inflight.discard(s.code)
+
+            gene = gene_map.get(s.code)
+            gene_fresh = False
+            if gene and gene.get("updated_at"):
+                try:
+                    age = (
+                        datetime.now() - datetime.fromisoformat(str(gene["updated_at"]))
+                    ).total_seconds()
+                    gene_fresh = age < gene_ttl and _gene_list_complete(gene)
+                except Exception:
+                    gene_fresh = _gene_list_complete(gene)
+            if gene and _gene_list_complete(gene):
+                _apply_gene_fields(s, gene)
+            if gene_fresh:
+                self._gene_complete.add(s.code)
+            else:
+                self._gene_complete.discard(s.code)
+            if (
+                s.code not in self._gene_complete
+                and s.code not in self._gene_inflight
+                and now >= self._gene_retry_at.get(s.code, 0)
+            ):
+                self._gene_inflight.add(s.code)
+                try:
+                    self._gene_queue.put_nowait(s.code)
+                except Exception:
+                    self._gene_inflight.discard(s.code)
+
+    async def gene_worker(self) -> None:
+        """低并发补齐涨停基因三率，写 stock_gene_stats。"""
+        sem = asyncio.Semaphore(2)
+
+        async def _one() -> None:
+            while True:
+                code = await self._gene_queue.get()
+                try:
+                    async with sem:
+                        gene = await self.refresh_gene_stats(code)
+                    if _gene_list_complete(gene):
+                        self._gene_complete.add(code)
+                        self._gene_retry_at.pop(code, None)
+                    else:
+                        self._gene_complete.discard(code)
+                        self._gene_retry_at[code] = datetime.now().timestamp() + 120
+                except Exception:
+                    self._gene_complete.discard(code)
+                    self._gene_retry_at[code] = datetime.now().timestamp() + 120
+                finally:
+                    self._gene_inflight.discard(code)
+                    self._gene_queue.task_done()
+
+        await asyncio.gather(*[_one() for _ in range(2)])
+
+    async def refresh_gene_stats(self, code: str) -> dict[str, Any]:
+        """计算并落库基因三率；优先复用 radar TTL / 未过期 DB。"""
+        from ..collectors.ths import ThsClient, build_stock_radar
+
+        code = code.zfill(6)
+        ttl = 30 * 60 if _is_trading_time() else 2 * 3600
+        cached = await get_gene_stats(code)
+        if cached and cached.get("updated_at") and _gene_list_complete(cached):
+            try:
+                age = (
+                    datetime.now() - datetime.fromisoformat(str(cached["updated_at"]))
+                ).total_seconds()
+                if age < ttl:
+                    return cached
+            except Exception:
+                pass
+
+        if self._ths is None:
+            self._ths = ThsClient()
+        radar = await build_stock_radar(code, self.client, self._ths, lookback="1y")
+        gene = (radar or {}).get("gene") or {}
+        data = {
+            "code": code,
+            "zt_success_rate": gene.get("zt_success_rate"),
+            "first_seal_rate": gene.get("first_seal_rate"),
+            "next_red_rate": gene.get("next_red_rate"),
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        await upsert_gene_stats(code, data)
+        return data
 
     async def get_stocks_by_codes(self, codes: list[str]) -> list[StockItem]:
         """Resolve watchlist codes: prefer live pool snapshot, else rich quotes.
@@ -750,13 +1175,13 @@ class MarketService:
         ttl = 0.5
         cached = self._batch_quote_cache.get(key)
         if cached and (now - cached[0]) < ttl:
-            return list(cached[1])
+            return self.filter_st_stocks(list(cached[1]))
 
         async with self._batch_quote_lock:
             now = datetime.now().timestamp()
             cached = self._batch_quote_cache.get(key)
             if cached and (now - cached[0]) < ttl:
-                return list(cached[1])
+                return self.filter_st_stocks(list(cached[1]))
             task = self._batch_quote_inflight.get(key)
             if task is None or task.done():
                 async def _load() -> list[StockItem]:
@@ -820,7 +1245,7 @@ class MarketService:
             items = await task
         except Exception:
             if cached:
-                return list(cached[1])
+                return self.filter_st_stocks(list(cached[1]))
             raise
         finally:
             if self._batch_quote_inflight.get(key) is task:
@@ -834,7 +1259,7 @@ class MarketService:
             ]
             for k, _ in oldest:
                 self._batch_quote_cache.pop(k, None)
-        return list(items)
+        return self.filter_st_stocks(list(items))
 
     @staticmethod
     def _ladder_stock_count(ladder: list[LadderGroup]) -> int:
@@ -1791,6 +2216,10 @@ class MarketService:
             enabled_types = set()
         if enabled_types:
             new_events = [e for e in new_events if e.type in enabled_types]
+        if not self._show_st_enabled():
+            new_events = [
+                e for e in new_events if not self._is_st_like_name(e.name)
+            ]
         if not new_events:
             return []
 
@@ -1805,11 +2234,21 @@ class MarketService:
     async def force_refresh_alerts(self) -> dict[str, Any]:
         """手动刷新：立即拉监控股行情并跑异动检测（不限交易时段）。"""
         events = await self.refresh_alerts()
+        feed = [e.model_dump() for e in (self.snapshot.alert_feed or [])]
+        if not self._show_st_enabled():
+            feed = [
+                e
+                for e in feed
+                if not self._is_st_like_name(str(e.get("name") or ""))
+            ]
+            events = [
+                e for e in events if not self._is_st_like_name(e.name)
+            ]
         return {
             "ok": True,
             "count": len(events),
             "events": [e.model_dump() for e in events],
-            "feed": [e.model_dump() for e in (self.snapshot.alert_feed or [])],
+            "feed": feed,
             "updated_at": datetime.now().isoformat(timespec="seconds"),
         }
 
@@ -1975,6 +2414,7 @@ class MarketService:
                 "concepts",
                 "free_float_mv",
                 "top10_holder_pct",
+                "top10_major_holder_pct",
                 "top10_holders",
                 "top10_holders_date",
                 "former_names",
@@ -1985,6 +2425,10 @@ class MarketService:
                     if k == "free_float_mv" and _free_float_looks_wrong(old):
                         continue
                     data[k] = old[k]
+            if data.get("top10_major_holder_pct") is None:
+                derived = _fund_major_holder_pct(data) or _fund_major_holder_pct(old)
+                if derived is not None:
+                    data["top10_major_holder_pct"] = derived
         await upsert_fundamentals(code, data)
         seal_r, board_r = await calc_year_rates(code)
         data["year_seal_rate"] = seal_r
@@ -2017,6 +2461,7 @@ class MarketService:
             "float_mv",
             "free_float_mv",
             "top10_holder_pct",
+            "top10_major_holder_pct",
             "top10_holders",
             "top10_holders_date",
             "former_names",
@@ -2029,6 +2474,10 @@ class MarketService:
         ):
             if fund.get(k) not in (None, "", []):
                 base[k] = fund[k]
+        if base.get("top10_major_holder_pct") is None:
+            derived = _fund_major_holder_pct(fund)
+            if derived is not None:
+                base["top10_major_holder_pct"] = derived
         # 允许空列表写回（表示已拉取且无曾用名 / 无股东）
         if isinstance(fund.get("top10_holders"), list):
             base["top10_holders"] = fund["top10_holders"]
@@ -2187,7 +2636,7 @@ class MarketService:
             and int(cached.get("count") or 0) > 0
             and cached.get("board_groups") is not None
         ):
-            return cached
+            return self.filter_st_history_payload(cached)
 
         kpl = KaipanlaClient()
         try:
@@ -2348,7 +2797,7 @@ class MarketService:
                 )
             except Exception:
                 pass
-        return payload
+        return self.filter_st_history_payload(payload)
 
     @staticmethod
     def _board_label(board: int) -> str:
@@ -3415,6 +3864,19 @@ class MarketService:
                 pass
         return await self.get_auction_board(days=1)
 
+    async def force_refresh_auction_prev_ladder(self) -> dict[str, Any]:
+        """手动刷新昨日连板竞价：清缓存；竞价中同步重采观察池，再重算涨幅。"""
+        self.__init_auction_state()
+        self._auction_board_cache = None
+        self._auction_prev_cache = None
+        phase = self._auction_phase()
+        if phase == "auction":
+            try:
+                await self.refresh_auction(force_slot=True)
+            except Exception:
+                pass
+        return await self.get_auction_prev_ladder()
+
     async def auction_loop(self) -> None:
         """独立竞价轮询：9:10 预热清空；9:15–9:25 拉观察池（9:25 后停，避让天梯）。"""
         from ..db import load_user_config
@@ -3754,7 +4216,7 @@ class MarketService:
         ):
             out = dict(cached[1])
             out.pop("_cache_key", None)
-            return out
+            return self.filter_st_auction_board(out)
 
         live = list(self._auction_live) if phase == "auction" else []
         label = req_date
@@ -3961,7 +4423,7 @@ class MarketService:
         self._auction_board_cache = (now.timestamp(), result)
         public = dict(result)
         public.pop("_cache_key", None)
-        return public
+        return self.filter_st_auction_board(public)
 
     async def get_auction_prev_ladder(self) -> dict[str, Any]:
         """昨日涨停股 + 今日竞价涨幅，按连板数分组（对齐天梯晋级视角）。
@@ -3984,9 +4446,11 @@ class MarketService:
             hit = cached[1]
             # 缓存若仍是旧锚点日，丢弃重算
             if str(hit.get("trade_date") or "") == today:
-                return hit
+                return self.filter_st_auction_prev_ladder(hit)
 
-        # 核心口径：上一交易日东财涨停池 + 今日竞价涨幅（冻结后不刷实时）
+        # 核心口径：上一交易日东财涨停池 + 今日竞价涨幅
+        # 盘后冻结口径 = 开盘价/昨收（=9:25 最终撮合），不以竞价观察池快照为准：
+        # 观察池只覆盖涨幅榜/一字约一两百只，且 jjyd 偶发把涨停 10% 误写入非涨停开盘股。
         prev_ds, prev_rows = await self._prev_trade_zt_pool(today)
 
         codes = [
@@ -3999,16 +4463,24 @@ class MarketService:
         name_map: dict[str, str] = {}
         suspended: set[str] = set()
 
-        # 优先用竞价 live / 落库快照中的 auction_pct
-        for r in self._auction_live:
-            code = str(r.get("code") or "").zfill(6)
-            if code not in code_set:
-                continue
-            pct_map[code] = float(r.get("auction_pct") or 0)
-            if r.get("name"):
-                name_map[code] = str(r.get("name") or "")
+        def _put_pct(code: str, pct: float | None) -> None:
+            if code not in code_set or pct is None:
+                return
+            try:
+                pct_map[code] = float(pct)
+            except (TypeError, ValueError):
+                return
 
-        if phase != "auction":
+        if phase == "auction":
+            # 竞价中：优先 live / 落库撮合涨幅，缺的用腾讯现价补
+            for r in self._auction_live:
+                code = str(r.get("code") or "").zfill(6)
+                if code not in code_set:
+                    continue
+                if r.get("auction_pct") is not None:
+                    _put_pct(code, r.get("auction_pct"))
+                if r.get("name"):
+                    name_map[code] = str(r.get("name") or "")
             try:
                 db_slots = await load_auction_day(today)
             except Exception:
@@ -4018,48 +4490,73 @@ class MarketService:
                     code = str(r.get("code") or "").zfill(6)
                     if code not in code_set or code in pct_map:
                         continue
-                    if r.get("auction_pct") is None and not r.get("name"):
+                    if r.get("auction_pct") is None:
                         continue
-                    pct_map[code] = float(r.get("auction_pct") or 0)
+                    _put_pct(code, r.get("auction_pct"))
                     if r.get("name"):
                         name_map[code] = str(r.get("name") or "")
-
-        # 竞价中：腾讯补撮合价；盘后仅在快照全空时一次性用开盘价回填（不轮询）
-        need_quotes = False
-        use_open = False
-        if phase == "auction":
-            need_quotes = True
-        elif not pct_map and codes:
-            need_quotes = True
-            use_open = True
-        if need_quotes:
-            missing = [c for c in codes if c not in pct_map] if phase == "auction" else codes
+            missing = [c for c in codes if c not in pct_map]
+            if missing:
+                try:
+                    quotes = await self.client.fetch_quotes_tencent_batch(missing)
+                except Exception:
+                    quotes = {}
+                for code, q in (quotes or {}).items():
+                    if q.get("name"):
+                        name_map[code] = str(q.get("name") or "")
+                    prev = float(q.get("prev_close") or 0)
+                    last = float(q.get("price") or 0)
+                    if last <= 0 or prev <= 0:
+                        if last <= 0:
+                            suspended.add(code)
+                        continue
+                    # 竞价中用撮合价/昨收，不用盘中实时涨幅字段
+                    pct_map[code] = round((last - prev) / prev * 100, 2)
+        else:
+            # 盘后：全量用开盘价算竞价涨幅，覆盖全部昨日涨停（解决大量「—」）
             try:
-                quotes = await self.client.fetch_quotes_tencent_batch(missing or codes)
+                quotes = await self.client.fetch_quotes_tencent_batch(codes)
             except Exception:
                 quotes = {}
-            for code, q in (quotes or {}).items():
+            for code in codes:
+                q = quotes.get(code) or {}
                 if q.get("name"):
                     name_map[code] = str(q.get("name") or "")
                 prev = float(q.get("prev_close") or 0)
                 open_p = float(q.get("open") or 0)
-                last = float(q.get("price") or 0)
-                if use_open:
+                if open_p <= 0 or prev <= 0:
                     if open_p <= 0:
                         suspended.add(code)
+                    continue
+                pct_map[code] = round((open_p - prev) / prev * 100, 2)
+
+            # 开盘价缺失时，再用落库 9:25→9:15 快照兜底（不覆盖已有开盘价）
+            still_missing = [c for c in codes if c not in pct_map]
+            if still_missing:
+                miss_set = set(still_missing)
+                try:
+                    db_slots = await load_auction_day(today)
+                except Exception:
+                    db_slots = {}
+                for slot in ("0925", "0920", "0915"):
+                    for r in db_slots.get(slot) or []:
+                        code = str(r.get("code") or "").zfill(6)
+                        if code not in miss_set or code in pct_map:
+                            continue
+                        if r.get("auction_pct") is None:
+                            continue
+                        _put_pct(code, r.get("auction_pct"))
+                        if r.get("name"):
+                            name_map[code] = str(r.get("name") or "")
+                for r in self._auction_live:
+                    code = str(r.get("code") or "").zfill(6)
+                    if code not in miss_set or code in pct_map:
                         continue
-                    if prev > 0 and code not in pct_map:
-                        pct_map[code] = round((open_p - prev) / prev * 100, 2)
-                    continue
-                if last <= 0:
-                    suspended.add(code)
-                    continue
-                if code in pct_map:
-                    continue
-                pct = float(q.get("change_pct") or 0)
-                if abs(pct) < 1e-12 and prev > 0:
-                    pct = round((last - prev) / prev * 100, 2)
-                pct_map[code] = pct
+                    if r.get("auction_pct") is None:
+                        continue
+                    _put_pct(code, r.get("auction_pct"))
+                    if r.get("name"):
+                        name_map[code] = str(r.get("name") or "")
 
         def _market_of(code: str) -> str:
             if code.startswith(("300", "301")):
@@ -4124,12 +4621,15 @@ class MarketService:
                 # 与例图一致：昨日首板行展示为 1进2，另可有「首板」——此处昨日涨停里 board=1 即 1进2
             else:
                 label = f"{board}进{board + 1}"
-            # 竞价封板率：有竞价涨幅且接近涨停（≥9.5%）/ 组内总数
+            # 竞价封板率：接近各自涨停阈值（主板约 9.5%，双创约 19.5%）
             sealed_n = sum(
                 1
                 for x in stocks
                 if x.get("auction_pct") is not None
-                and float(x.get("auction_pct") or 0) >= 9.5
+                and float(x.get("auction_pct") or 0)
+                >= self._limit_thr_for(
+                    str(x.get("name") or ""), str(x.get("code") or "")
+                )
             )
             total_n = len(stocks)
             rate_pct = int(round(100.0 * sealed_n / total_n)) if total_n else 0
@@ -4152,7 +4652,7 @@ class MarketService:
             "groups": groups,
         }
         self._auction_prev_cache = (now_ts, result)
-        return result
+        return self.filter_st_auction_prev_ladder(result)
 
     @staticmethod
     def format_money(v: float) -> str:
