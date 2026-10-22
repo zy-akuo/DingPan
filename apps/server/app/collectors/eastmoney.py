@@ -963,10 +963,21 @@ class EastMoneyClient:
                 {
                     "time": time_label,
                     "price": price,
-                    "avg": price,
+                    "avg": price,  # 下方按日重算 VWAP
                     "volume": volume,
                 }
             )
+        # 新浪无均价字段：按日用价×量累计成 VWAP，避免黄线贴着现价抖
+        for day, pts in by_day.items():
+            cum_vol = 0.0
+            cum_amt = 0.0
+            for pt in pts:
+                price = float(pt.get("price") or 0)
+                vol = float(pt.get("volume") or 0)
+                if vol > 0 and price > 0:
+                    cum_vol += vol
+                    cum_amt += price * vol
+                pt["avg"] = round((cum_amt / cum_vol) if cum_vol > 0 else price, 3)
         picked = self._pick_trend_day(dict(by_day))
         if not picked:
             return {"code": code, "name": "", "pre_close": 0, "points": [], "trade_date": ""}

@@ -120,9 +120,29 @@ function normTime(raw: string): string {
   return `${m[1].padStart(2, "0")}:${m[2]}`;
 }
 
+/**
+ * 分时均价线（例图1）：按成交量加权的累计均价（VWAP）。
+ * 用价×量累加，避开不同源成交额/量单位不一致；
+ * 并覆盖「avg=现价」导致黄线贴蓝线抖动的坏数据。
+ */
+function withVwap(points: TrendPoint[]): TrendPoint[] {
+  let cumAmt = 0;
+  let cumVol = 0;
+  return points.map((p) => {
+    const price = Number(p.price) || 0;
+    const vol = Math.max(0, Number(p.volume) || 0);
+    if (vol > 0 && price > 0) {
+      cumVol += vol;
+      cumAmt += price * vol;
+    }
+    const avg = cumVol > 0 ? cumAmt / cumVol : price;
+    return { ...p, avg: Math.round(avg * 1000) / 1000 };
+  });
+}
+
 function alignTrendToAxis(points: TrendPoint[]) {
   const map = new Map<string, TrendPoint>();
-  for (const p of points) {
+  for (const p of withVwap(points)) {
     const t = normTime(p.time);
     if (t) map.set(t, { ...p, time: t });
   }
@@ -451,7 +471,8 @@ function buildTrendOption(points: TrendPoint[], preClose: number, dark: boolean)
         connectNulls: false,
         showSymbol: false,
         symbol: "none",
-        lineStyle: { width: 1.2, color: AVG_LINE },
+        smooth: false,
+        lineStyle: { width: 1.4, color: AVG_LINE, cap: "round", join: "round" },
         z: 4,
       },
       {

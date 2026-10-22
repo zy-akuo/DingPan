@@ -48,7 +48,9 @@ export function SpeedRankPanel({
   const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
   const [adding, setAdding] = useState(false);
   const timer = useRef<number | null>(null);
-  const seq = useRef(0);
+  /** 仅在换板/卸载时递增，用于作废进行中的请求 */
+  const genRef = useRef(0);
+  const busyRef = useRef(false);
   const sigRef = useRef("");
   const abortRef = useRef<AbortController | null>(null);
   const rowsRef = useRef<StockItem[]>([]);
@@ -61,28 +63,32 @@ export function SpeedRankPanel({
   }, [rows]);
 
   const refresh = useCallback(async () => {
-    // 不取消进行中的请求：慢成功不应被下一轮 abort 掉；用序号丢弃过期回包
-    const my = ++seq.current;
+    // 串行轮询：上一轮未完成则跳过，避免叠请求后用序号把有效回包全部丢掉
+    if (busyRef.current) return;
+    busyRef.current = true;
     const boardAtStart = boardRef.current;
+    const gen = genRef.current;
     const ac = new AbortController();
     abortRef.current = ac;
+    const timeoutId = window.setTimeout(() => ac.abort(), 8000);
     try {
       const res = await fetch(
         `/api/market/speed?limit=${SPEED_LIMIT}&board=${encodeURIComponent(boardAtStart)}`,
         { signal: ac.signal },
       );
-      if (!res.ok || my !== seq.current || boardRef.current !== boardAtStart) return;
+      if (!res.ok || gen !== genRef.current || boardRef.current !== boardAtStart) return;
       const data = (await res.json()) as {
         items: StockItem[];
         updated_at?: string;
       };
+      if (gen !== genRef.current || boardRef.current !== boardAtStart) return;
       // 前端再兜底：只要涨速>0，并按涨速从大到小
       const items = (data.items || [])
         .filter((s) => Number(s.speed ?? 0) > 0)
         .sort((a, b) => Number(b.speed ?? 0) - Number(a.speed ?? 0));
       // 空结果：保留已有列表，只刷新时间戳（若有）
       if (!items.length) {
-        if (data.updated_at && my === seq.current && rowsRef.current.length) {
+        if (data.updated_at && rowsRef.current.length) {
           setUpdated(data.updated_at.slice(11));
         }
         return;
@@ -102,17 +108,22 @@ export function SpeedRankPanel({
           return next;
         });
       });
-      if (data.updated_at && my === seq.current) {
+      if (data.updated_at) {
         setUpdated(data.updated_at.slice(11));
       }
     } catch (e) {
       if ((e as { name?: string })?.name === "AbortError") return;
       /* keep previous */
+    } finally {
+      window.clearTimeout(timeoutId);
+      if (abortRef.current === ac) abortRef.current = null;
+      busyRef.current = false;
     }
   }, []);
 
   useEffect(() => {
-    seq.current += 1;
+    genRef.current += 1;
+    busyRef.current = false;
     sigRef.current = "";
     setRows([]);
     setSelectedKeys([]);
@@ -123,7 +134,8 @@ export function SpeedRankPanel({
     return () => {
       if (timer.current) window.clearInterval(timer.current);
       abortRef.current?.abort();
-      seq.current += 1;
+      genRef.current += 1;
+      busyRef.current = false;
     };
   }, [pollSec, refresh, board]);
 
