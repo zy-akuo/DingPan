@@ -1,6 +1,8 @@
+import { LeftOutlined, RightOutlined } from "@ant-design/icons";
 import { Modal, Spin } from "antd";
 import * as echarts from "echarts";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { calcCyq, type CyqResult } from "../lib/cyqCalculator";
 import { cacheGet, cacheSet } from "../lib/localCache";
 
 type ChartStock = { code: string; name: string };
@@ -39,6 +41,10 @@ const VOL_MA10_C = "#a855f7";
 
 const KLINE_LIMIT = 500;
 const KLINE_VIEW = 100;
+const CHIP_PANEL_W = 132;
+const CHIP_PROFIT = "#ef5350";
+const CHIP_LOSS = "#26a69a";
+const CHIP_AVG = "#f59e0b";
 
 type ChartPalette = {
   bg: string;
@@ -220,6 +226,15 @@ function fmtAmount(amount?: number | null): string {
   return amount.toFixed(0);
 }
 
+/** 分时点成交额：优先用源字段，缺省时用价×量（股）估算 */
+function pointAmount(p: TrendPoint): number | null {
+  if (p.amount != null && !Number.isNaN(p.amount) && p.amount > 0) return p.amount;
+  const price = Number(p.price) || 0;
+  const vol = Number(p.volume) || 0;
+  if (price > 0 && vol > 0) return price * vol;
+  return null;
+}
+
 function fmtNum(v: number | null | undefined, digits = 2): string {
   if (v == null || Number.isNaN(v)) return "—";
   return v.toFixed(digits);
@@ -329,10 +344,8 @@ function buildTrendOption(points: TrendPoint[], preClose: number, dark: boolean)
             chgColor,
           ),
           tipRow("成交量", `${fmtVolHands(p.volume)}手`),
+          tipRow("成交额", fmtAmount(pointAmount(p))),
         ];
-        if (p.amount != null && p.amount > 0) {
-          rows.push(tipRow("成交额", fmtAmount(p.amount)));
-        }
         return rows.join("");
       },
     },
@@ -505,7 +518,53 @@ function normBarDate(d: string): string {
   return "";
 }
 
-function buildKlineOption(bars: KBar[], dark: boolean, focusDate?: string) {
+/** 按像素 X 取日K索引：整列命中，一字板也能点中 */
+function pickKIndexFromPixel(
+  chart: echarts.ECharts,
+  offsetX: number,
+  offsetY: number,
+  bars: KBar[],
+): number {
+  const n = bars.length;
+  if (n <= 0) return -1;
+  const resolve = (raw: unknown): number => {
+    if (typeof raw === "number" && !Number.isNaN(raw)) {
+      const idx = Math.round(raw);
+      return idx >= 0 && idx < n ? idx : -1;
+    }
+    if (typeof raw === "string") {
+      const idx = bars.findIndex(
+        (b) => b.date === raw || normBarDate(b.date) === normBarDate(raw),
+      );
+      return idx;
+    }
+    return -1;
+  };
+  try {
+    const xVal = chart.convertFromPixel({ xAxisIndex: 0 }, [offsetX, offsetY]);
+    const hit = resolve(Array.isArray(xVal) ? xVal[0] : xVal);
+    if (hit >= 0) return hit;
+  } catch {
+    /* ignore */
+  }
+  try {
+    const pt = chart.convertFromPixel({ gridIndex: 0 }, [offsetX, offsetY]);
+    if (pt) {
+      const hit = resolve(pt[0]);
+      if (hit >= 0) return hit;
+    }
+  } catch {
+    /* ignore */
+  }
+  return -1;
+}
+
+function buildKlineOption(
+  bars: KBar[],
+  dark: boolean,
+  focusDate?: string,
+  chip?: { result: CyqResult; close: number } | null,
+) {
   const pal = chartPalette(dark);
   const dates = bars.map((b) => b.date);
   const values = bars.map((b) => [b.open, b.close, b.low, b.high]);
@@ -528,13 +587,37 @@ function buildKlineOption(bars: KBar[], dark: boolean, focusDate?: string) {
     }
   }
   const ptrBg = dark ? "#484f58" : "#334155";
+  const showChip = !!chip?.result;
+  const rightPad = showChip ? 56 + CHIP_PANEL_W : 64;
 
-  return {
+  const viewFrom = Math.floor((startPct / 100) * n);
+  const viewTo = Math.min(n, Math.ceil((endPct / 100) * n));
+  const viewSlice = bars.slice(Math.max(0, viewFrom), Math.max(viewFrom + 1, viewTo));
+  let yMin = Math.min(...viewSlice.map((b) => b.low));
+  let yMax = Math.max(...viewSlice.map((b) => b.high));
+  if (showChip && chip) {
+    const cMin = Math.min(...chip.result.prices);
+    const cMax = Math.max(...chip.result.prices);
+    yMin = Math.min(yMin, cMin);
+    yMax = Math.max(yMax, cMax);
+  }
+  const yPad = (yMax - yMin) * 0.04 || 0.01;
+  yMin -= yPad;
+  yMax += yPad;
+
+  const maxChip = showChip ? Math.max(...chip!.result.chips, 1e-12) : 1;
+  const chipAccuracy =
+    showChip && chip!.result.prices.length > 1
+      ? Math.abs(chip!.result.prices[1] - chip!.result.prices[0])
+      : 0.01;
+
+  type Opt = Record<string, unknown>;
+  const option: Opt = {
     backgroundColor: pal.bg,
     animation: false,
     legend: { show: false },
     axisPointer: {
-      link: [{ xAxisIndex: "all" }],
+      link: [{ xAxisIndex: [0, 1] }],
       label: { backgroundColor: ptrBg, color: "#fff" },
     },
     tooltip: {
@@ -594,8 +677,8 @@ function buildKlineOption(bars: KBar[], dark: boolean, focusDate?: string) {
       },
     ],
     grid: [
-      { left: 12, right: 64, top: 28, height: "58%" },
-      { left: 12, right: 64, top: "74%", height: "18%" },
+      { left: 12, right: rightPad, top: 28, height: "58%" },
+      { left: 12, right: rightPad, top: "74%", height: "18%" },
     ],
     xAxis: [
       {
@@ -631,7 +714,9 @@ function buildKlineOption(bars: KBar[], dark: boolean, focusDate?: string) {
     yAxis: [
       {
         type: "value",
-        scale: true,
+        scale: !showChip,
+        min: showChip ? yMin : undefined,
+        max: showChip ? yMax : undefined,
         position: "right",
         splitLine: { lineStyle: { type: "dashed", color: pal.grid } },
         axisLabel: { color: pal.muted, fontSize: 11 },
@@ -744,8 +829,100 @@ function buildKlineOption(bars: KBar[], dark: boolean, focusDate?: string) {
         lineStyle: { width: 1, color: VOL_MA10_C },
         z: 3,
       },
-    ],
+    ] as Opt[],
   };
+
+  if (showChip && chip) {
+    const grids = option.grid as Opt[];
+    grids.push({
+      right: 8,
+      width: CHIP_PANEL_W - 16,
+      top: 28,
+      height: "58%",
+    });
+    const xAxes = option.xAxis as Opt[];
+    xAxes.push({
+      type: "value",
+      gridIndex: 2,
+      min: 0,
+      max: maxChip * 1.05,
+      show: false,
+      axisPointer: { show: false },
+    });
+    const yAxes = option.yAxis as Opt[];
+    yAxes.push({
+      type: "value",
+      gridIndex: 2,
+      min: yMin,
+      max: yMax,
+      show: false,
+      axisPointer: { show: false },
+    });
+    const series = option.series as Opt[];
+    const close = chip.close;
+    const halfH = chipAccuracy / 2;
+    series.push({
+      name: "筹码峰",
+      type: "custom",
+      xAxisIndex: 2,
+      yAxisIndex: 2,
+      clip: true,
+      silent: true,
+      tooltip: { show: false },
+      renderItem: (
+        _params: unknown,
+        api: {
+          value: (dim: number) => number;
+          coord: (val: number[]) => number[];
+        },
+      ) => {
+        const price = api.value(0);
+        const amount = api.value(1);
+        if (!(amount > 0)) return null;
+        const p0 = api.coord([0, price]);
+        const p1 = api.coord([amount, price]);
+        const pHi = api.coord([0, price + halfH]);
+        const pLo = api.coord([0, price - halfH]);
+        const h = Math.max(1, Math.abs(pLo[1] - pHi[1]));
+        return {
+          type: "rect",
+          shape: {
+            x: p0[0],
+            y: p0[1] - h / 2,
+            width: Math.max(0, p1[0] - p0[0]),
+            height: h,
+          },
+          style: {
+            fill: price <= close ? CHIP_PROFIT : CHIP_LOSS,
+            opacity: 0.85,
+          },
+        };
+      },
+      data: chip.result.prices.map((pr, i) => [pr, chip.result.chips[i]]),
+      z: 8,
+    });
+    series.push({
+      name: "平均成本",
+      type: "line",
+      markLine: {
+        silent: true,
+        symbol: "none",
+        label: {
+          show: true,
+          formatter: `成本 ${chip.result.avgCost.toFixed(2)}`,
+          color: CHIP_AVG,
+          fontSize: 10,
+          position: "insideEndTop",
+        },
+        lineStyle: { color: CHIP_AVG, type: "dashed", width: 1 },
+        data: [{ yAxis: chip.result.avgCost }],
+      },
+      data: [],
+      z: 9,
+    });
+  }
+
+  return option;
 }
 
 function klineCacheFresh(bars: KBar[]): boolean {
@@ -772,7 +949,15 @@ function emptyTitle(text: string, dark: boolean) {
   };
 }
 
-function KInfoBar({ bars, index }: { bars: KBar[]; index: number }) {
+function KInfoBar({
+  bars,
+  index,
+  onViewTrend,
+}: {
+  bars: KBar[];
+  index: number;
+  onViewTrend?: (day: string) => void;
+}) {
   const i = index >= 0 && index < bars.length ? index : bars.length - 1;
   const b = bars[i];
   if (!b) return null;
@@ -785,9 +970,20 @@ function KInfoBar({ bars, index }: { bars: KBar[]; index: number }) {
   const ma60 = smaAt(closes, i, 60);
   const vma5 = smaAt(vols, i, 5);
   const vma10 = smaAt(vols, i, 10);
+  const dayKey = normBarDate(b.date);
   return (
     <div className="chart-k-info">
       <span className="k-date">{b.date}</span>
+      {onViewTrend && dayKey ? (
+        <button
+          type="button"
+          className="chart-view-trend-btn"
+          title="查看该日分时（也可双击K线）"
+          onClick={() => onViewTrend(dayKey)}
+        >
+          查看分时
+        </button>
+      ) : null}
       <span>
         MA5: <b style={{ color: MA5_C }}>{fmtNum(ma5)}</b>
       </span>
@@ -816,6 +1012,186 @@ function KInfoBar({ bars, index }: { bars: KBar[]; index: number }) {
   );
 }
 
+/** 日K「查看分时」弹出层：数据与主分时图同一套接口与绘制规则 */
+function DayTrendPeek({
+  code,
+  name,
+  day,
+  open,
+  onClose,
+  dark,
+}: {
+  code: string;
+  name: string;
+  day: string;
+  open: boolean;
+  onClose: () => void;
+  dark: boolean;
+}) {
+  const boxRef = useRef<HTMLDivElement | null>(null);
+  const chartRef = useRef<echarts.ECharts | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const dayLabel = (() => {
+    const d = normBarDate(day);
+    return d
+      ? `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}`
+      : day;
+  })();
+
+  useEffect(() => {
+    if (!open) {
+      chartRef.current?.dispose();
+      chartRef.current = null;
+      return;
+    }
+    let cancelled = false;
+    const waitEl = () =>
+      new Promise<HTMLDivElement>((resolve, reject) => {
+        let n = 0;
+        const tick = () => {
+          if (cancelled) {
+            reject(new Error("cancelled"));
+            return;
+          }
+          const el = boxRef.current;
+          if (el && el.clientWidth >= 8) {
+            resolve(el);
+            return;
+          }
+          n += 1;
+          if (n > 40) {
+            reject(new Error("chart box not ready"));
+            return;
+          }
+          window.setTimeout(tick, 50);
+        };
+        tick();
+      });
+
+    const load = async () => {
+      setLoading(true);
+      setError("");
+      try {
+        const d = normBarDate(day);
+        const q = d ? `?date=${encodeURIComponent(d)}` : "";
+        const res = await fetch(`/api/stock/${code}/trends${q}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (cancelled) return;
+        const points = (data.points || []) as TrendPoint[];
+        const preClose = Number(data.pre_close) || 0;
+        const el = await waitEl();
+        if (cancelled) return;
+        if (chartRef.current && chartRef.current.getDom() !== el) {
+          chartRef.current.dispose();
+          chartRef.current = null;
+        }
+        if (!chartRef.current) chartRef.current = echarts.init(el);
+        const chart = chartRef.current;
+        if (!points.length) {
+          chart.clear();
+          chart.setOption(emptyTitle("暂无分时数据", dark), true);
+          setError(`暂无 ${dayLabel} 分时数据`);
+        } else {
+          chart.setOption(buildTrendOption(points, preClose, dark), true);
+        }
+        chart.resize();
+      } catch (e) {
+        if (!cancelled) {
+          console.error(e);
+          setError("分时数据加载失败");
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [open, code, day, dark, dayLabel]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onResize = () => chartRef.current?.resize();
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [open]);
+
+  return (
+    <Modal
+      open={open}
+      onCancel={onClose}
+      footer={null}
+      width="72vw"
+      style={{ top: "8vh", paddingBottom: 0 }}
+      className="stock-chart-modal stock-trend-peek-modal"
+      zIndex={1200}
+      destroyOnHidden
+      title={
+        <div className="chart-tabbar">
+          <span className="chart-stock-name">{name || "—"}</span>
+          <span className="chart-stock-code">{code}</span>
+          <span className="k-date" style={{ marginLeft: 8 }}>
+            分时 · {dayLabel}
+          </span>
+        </div>
+      }
+      styles={{
+        body: {
+          height: "calc(72vh - 72px)",
+          display: "flex",
+          flexDirection: "column",
+          overflow: "hidden",
+          paddingTop: 4,
+        },
+      }}
+    >
+      <div className="stock-chart-sheet">
+        <div className="stock-chart-body">
+          <Spin spinning={loading} className="stock-chart-spin">
+            <div ref={boxRef} className="stock-chart-box" />
+            {error ? <div className="chart-error">{error}</div> : null}
+          </Spin>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function ChipInfoBar({ cyq }: { cyq: CyqResult }) {
+  const b70 = cyq.percentChips["70"];
+  const b90 = cyq.percentChips["90"];
+  return (
+    <div className="chart-chip-info">
+      <span>
+        获利比例:{" "}
+        <b style={{ color: CHIP_PROFIT }}>
+          {(cyq.benefitPart * 100).toFixed(2)}%
+        </b>
+      </span>
+      <span>
+        平均成本: <b style={{ color: CHIP_AVG }}>{cyq.avgCost.toFixed(2)}</b>
+      </span>
+      <span>
+        90%成本:{" "}
+        <b>
+          {b90.priceRange[0].toFixed(2)}–{b90.priceRange[1].toFixed(2)}
+        </b>
+        <i>（集中{(b90.concentration * 100).toFixed(2)}%）</i>
+      </span>
+      <span>
+        70%成本:{" "}
+        <b>
+          {b70.priceRange[0].toFixed(2)}–{b70.priceRange[1].toFixed(2)}
+        </b>
+        <i>（集中{(b70.concentration * 100).toFixed(2)}%）</i>
+      </span>
+    </div>
+  );
+}
+
 export function StockChartModal({
   stock,
   open,
@@ -839,16 +1215,56 @@ export function StockChartModal({
   const [klines, setKlines] = useState<KBar[] | null>(null);
   const [kIndex, setKIndex] = useState(-1);
   const [dark, setDark] = useState(() => readDark());
-  const focusDay = normBarDate(asOfDate || "");
-  const focusDayLabel = focusDay
-    ? `${focusDay.slice(0, 4)}-${focusDay.slice(4, 6)}-${focusDay.slice(6, 8)}`
-    : "";
+  const [viewDate, setViewDate] = useState(() => normBarDate(asOfDate || ""));
+  const [chipOn, setChipOn] = useState(false);
+  const [peekDay, setPeekDay] = useState("");
+
+  const focusDay = viewDate;
+  const tradeDays = useMemo(
+    () => (klines || []).map((b) => normBarDate(b.date)).filter(Boolean),
+    [klines],
+  );
+  const dayIdx = focusDay ? tradeDays.indexOf(focusDay) : -1;
+  // 严格按日K交易日列表取相邻日（自动跳过周末/节假日）
+  const prevTradeDay = useMemo(() => {
+    if (!focusDay || !tradeDays.length) return "";
+    if (dayIdx > 0) return tradeDays[dayIdx - 1];
+    if (dayIdx === 0) return "";
+    for (let i = tradeDays.length - 1; i >= 0; i--) {
+      if (tradeDays[i] < focusDay) return tradeDays[i];
+    }
+    return "";
+  }, [focusDay, tradeDays, dayIdx]);
+  const nextTradeDay = useMemo(() => {
+    if (!focusDay || !tradeDays.length) return "";
+    if (dayIdx >= 0 && dayIdx < tradeDays.length - 1) return tradeDays[dayIdx + 1];
+    if (dayIdx === tradeDays.length - 1) return "";
+    for (let i = 0; i < tradeDays.length; i++) {
+      if (tradeDays[i] > focusDay) return tradeDays[i];
+    }
+    return "";
+  }, [focusDay, tradeDays, dayIdx]);
+
+  const chipPayload = useMemo(() => {
+    if (!chipOn || !klines?.length || kIndex < 0) return null;
+    const result = calcCyq(kIndex, klines, 120);
+    if (!result) return null;
+    return { result, close: klines[kIndex].close };
+  }, [chipOn, klines, kIndex]);
 
   const boxRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<echarts.ECharts | null>(null);
   const roRef = useRef<ResizeObserver | null>(null);
   const kPickRef = useRef<(i: number) => void>(() => undefined);
+  const peekDayRef = useRef<(d: string) => void>(() => undefined);
+  const zrClickRef = useRef<((e: { offsetX: number; offsetY: number }) => void) | null>(
+    null,
+  );
+  const zrDblClickRef = useRef<((e: { offsetX: number; offsetY: number }) => void) | null>(
+    null,
+  );
   kPickRef.current = (i: number) => setKIndex(i);
+  peekDayRef.current = (d: string) => setPeekDay(d);
 
   useEffect(() => {
     const sync = () => setDark(readDark());
@@ -868,12 +1284,23 @@ export function StockChartModal({
     setKlines(null);
     setKIndex(-1);
     setError("");
-  }, [open, stock?.code, focusDay]);
+    setChipOn(false);
+    setPeekDay("");
+    setViewDate(normBarDate(asOfDate || ""));
+  }, [open, stock?.code, asOfDate]);
 
   const disposeChart = useCallback(() => {
     roRef.current?.disconnect();
     roRef.current = null;
-    chartRef.current?.dispose();
+    const chart = chartRef.current;
+    if (chart) {
+      const zr = chart.getZr();
+      if (zrClickRef.current) zr.off("click", zrClickRef.current);
+      if (zrDblClickRef.current) zr.off("dblclick", zrDblClickRef.current);
+      zrClickRef.current = null;
+      zrDblClickRef.current = null;
+      chart.dispose();
+    }
     chartRef.current = null;
   }, []);
 
@@ -915,17 +1342,36 @@ export function StockChartModal({
           chart.clear();
           chart.setOption(emptyTitle("暂无日线数据", dark), true);
         } else {
-          chart.setOption(buildKlineOption(klines, dark, focusDay || undefined), true);
-          chart.off("click");
-          chart.on("click", (p: { dataIndex?: number }) => {
-            if (typeof p?.dataIndex === "number") kPickRef.current(p.dataIndex);
-          });
+          chart.setOption(
+            buildKlineOption(klines, dark, focusDay || undefined, chipPayload),
+            true,
+          );
+          // 用整列像素命中（一字板实体高度为 0，系列 click 点不中）
+          const zr = chart.getZr();
+          if (zrClickRef.current) zr.off("click", zrClickRef.current);
+          if (zrDblClickRef.current) zr.off("dblclick", zrDblClickRef.current);
+          zrClickRef.current = (e: { offsetX: number; offsetY: number }) => {
+            const idx = pickKIndexFromPixel(chart, e.offsetX, e.offsetY, klines);
+            if (idx >= 0) kPickRef.current(idx);
+          };
+          zrDblClickRef.current = (e: { offsetX: number; offsetY: number }) => {
+            const idx = pickKIndexFromPixel(chart, e.offsetX, e.offsetY, klines);
+            if (idx < 0) return;
+            const day = normBarDate(klines[idx]?.date || "");
+            if (day) peekDayRef.current(day);
+          };
+          zr.on("click", zrClickRef.current);
+          zr.on("dblclick", zrDblClickRef.current);
           chart.off("updateAxisPointer");
           chart.on("updateAxisPointer", (raw: unknown) => {
             const ev = raw as { axesInfo?: { value?: number | string }[] };
             const axes = ev?.axesInfo || [];
             for (const ax of axes) {
-              if (typeof ax.value === "number" && ax.value >= 0 && ax.value < klines.length) {
+              if (
+                typeof ax.value === "number" &&
+                ax.value >= 0 &&
+                ax.value < klines.length
+              ) {
                 kPickRef.current(Math.round(ax.value));
                 return;
               }
@@ -947,7 +1393,57 @@ export function StockChartModal({
       setError("图表渲染失败");
       return false;
     }
-  }, [ensureChart, tab, trends, klines, dark, focusDay]);
+  }, [ensureChart, tab, trends, klines, dark, focusDay, chipPayload]);
+
+  // 始终预拉日K：交易日历 + 筹码峰原料
+  useEffect(() => {
+    if (!open || !stock) return;
+    let cancelled = false;
+    const code = stock.code;
+    const loadK = async () => {
+      const ckey = `kline:v4:${code}:${KLINE_LIMIT}`;
+      const cached = cacheGet<KBar[]>(ckey);
+      if (cached?.length && klineCacheFresh(cached)) {
+        if (!cancelled) {
+          setKlines(cached);
+          setKIndex(cached.length - 1);
+        }
+      }
+      try {
+        const res = await fetch(`/api/stock/${code}/kline?limit=${KLINE_LIMIT}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (cancelled) return;
+        const bars = (data.bars || []) as KBar[];
+        setKlines(bars);
+        const fi = focusDay
+          ? bars.findIndex((b) => normBarDate(b.date) === focusDay)
+          : -1;
+        setKIndex(fi >= 0 ? fi : bars.length ? bars.length - 1 : -1);
+        if (bars.length && (focusDay || klineCacheFresh(bars))) {
+          cacheSet(ckey, bars, 30);
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    };
+    void loadK();
+    return () => {
+      cancelled = true;
+    };
+    // 仅随股票切换重拉；focusDay 变化时在下方同步 kIndex
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, stock?.code]);
+
+  useEffect(() => {
+    if (!klines?.length) return;
+    if (!focusDay) {
+      setKIndex(klines.length - 1);
+      return;
+    }
+    const fi = klines.findIndex((b) => normBarDate(b.date) === focusDay);
+    if (fi >= 0) setKIndex(fi);
+  }, [klines, focusDay]);
 
   useEffect(() => {
     if (!open || !stock) return;
@@ -957,7 +1453,7 @@ export function StockChartModal({
       setError("");
       try {
         if (tab === "trends") {
-          const ckey = `trends:${stock.code}:${focusDay || "latest"}`;
+          const ckey = `trends:v3:${stock.code}:${focusDay || "latest"}`;
           const cached = cacheGet<{
             points: TrendPoint[];
             preClose: number;
@@ -969,52 +1465,30 @@ export function StockChartModal({
           } else {
             setLoading(true);
           }
-          const q = focusDay
-            ? `?date=${encodeURIComponent(focusDay)}`
-            : "";
+          const q = focusDay ? `?date=${encodeURIComponent(focusDay)}` : "";
           const res = await fetch(`/api/stock/${stock.code}/trends${q}`);
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
           const data = await res.json();
           if (cancelled) return;
+          const td = normBarDate(String(data.trade_date || focusDay || ""));
           const next = {
             points: (data.points || []) as TrendPoint[],
             preClose: Number(data.pre_close) || 0,
-            tradeDate: String(data.trade_date || focusDay || ""),
+            tradeDate: td || String(data.trade_date || focusDay || ""),
           };
           setTrends(next);
+          if (td && !viewDate) setViewDate(td);
           if (next.points.length) {
             cacheSet(ckey, next, focusDay ? 30 * 60 : 20);
           } else if (focusDay) {
-            setError(`暂无 ${focusDay.slice(0, 4)}-${focusDay.slice(4, 6)}-${focusDay.slice(6, 8)} 分时数据`);
+            setError(
+              `暂无 ${focusDay.slice(0, 4)}-${focusDay.slice(4, 6)}-${focusDay.slice(6, 8)} 分时数据`,
+            );
           }
+        } else if (!klines?.length) {
+          setLoading(true);
         } else {
-          const ckey = `kline:v4:${stock.code}:${KLINE_LIMIT}`;
-          const cached = cacheGet<KBar[]>(ckey);
-          if (cached?.length && (focusDay || klineCacheFresh(cached))) {
-            setKlines(cached);
-            const fi = focusDay
-              ? cached.findIndex((b) => normBarDate(b.date) === focusDay)
-              : -1;
-            setKIndex(fi >= 0 ? fi : cached.length - 1);
-            setLoading(false);
-          } else {
-            setLoading(true);
-          }
-          const res = await fetch(
-            `/api/stock/${stock.code}/kline?limit=${KLINE_LIMIT}`,
-          );
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          const data = await res.json();
-          if (cancelled) return;
-          const bars = (data.bars || []) as KBar[];
-          setKlines(bars);
-          const fi = focusDay
-            ? bars.findIndex((b) => normBarDate(b.date) === focusDay)
-            : -1;
-          setKIndex(fi >= 0 ? fi : bars.length ? bars.length - 1 : -1);
-          if (bars.length && (focusDay || klineCacheFresh(bars))) {
-            cacheSet(ckey, bars, 30);
-          }
+          setLoading(false);
         }
       } catch (e) {
         if (!cancelled) {
@@ -1030,7 +1504,7 @@ export function StockChartModal({
     return () => {
       cancelled = true;
     };
-  }, [open, stock, tab, focusDay]);
+  }, [open, stock, tab, focusDay, viewDate, klines?.length]);
 
   useEffect(() => {
     if (!open) return;
@@ -1066,6 +1540,9 @@ export function StockChartModal({
     setKIndex(-1);
     setError("");
     setTab("trends");
+    setChipOn(false);
+    setPeekDay("");
+    setViewDate("");
   }, [open, disposeChart]);
 
   const setBoxRef = useCallback(
@@ -1083,75 +1560,129 @@ export function StockChartModal({
     [open, paint, disposeChart],
   );
 
+  const fmtViewDate = (raw: string) => {
+    const d = normBarDate(raw);
+    return d ? `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}` : raw;
+  };
+
+  const goPrevDay = () => {
+    if (prevTradeDay) setViewDate(prevTradeDay);
+  };
+  const goNextDay = () => {
+    if (nextTradeDay) setViewDate(nextTradeDay);
+  };
+
+  const dateLabel = trends?.tradeDate || focusDay;
+
   return (
-    <Modal
-      open={open}
-      onCancel={onClose}
-      footer={null}
-      width="78vw"
-      style={{ top: "6vh", paddingBottom: 0 }}
-      className="stock-chart-modal"
-      styles={{
-        body: {
-          height: "calc(80vh - 72px)",
-          display: "flex",
-          flexDirection: "column",
-          overflow: "hidden",
-          paddingTop: 4,
-        },
-      }}
-      destroyOnHidden
-      forceRender={false}
-      title={
-        <div className="chart-tabbar">
-          <span className="chart-stock-name">{stock?.name || "—"}</span>
-          <span className="chart-stock-code">{stock?.code}</span>
-          <button
-            type="button"
-            className={tab === "trends" ? "chart-tab on" : "chart-tab"}
-            onClick={() => setTab("trends")}
-          >
-            分时
-          </button>
-          <button
-            type="button"
-            className={tab === "kline" ? "chart-tab on" : "chart-tab"}
-            onClick={() => setTab("kline")}
-          >
-            日K
-          </button>
-        </div>
-      }
-    >
-      <div className="stock-chart-sheet">
-        {tab === "trends" && (trends?.tradeDate || focusDayLabel) ? (
-          <div className="chart-k-info">
-            <span className="k-date">
-              分时 ·{" "}
-              {(() => {
-                const raw = String(trends?.tradeDate || focusDayLabel || "");
-                const d = normBarDate(raw);
-                return d
-                  ? `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}`
-                  : raw;
-              })()}
-            </span>
+    <>
+      <Modal
+        open={open}
+        onCancel={onClose}
+        footer={null}
+        width="78vw"
+        style={{ top: "6vh", paddingBottom: 0 }}
+        className="stock-chart-modal"
+        styles={{
+          body: {
+            height: "calc(80vh - 72px)",
+            display: "flex",
+            flexDirection: "column",
+            overflow: "hidden",
+            paddingTop: 4,
+          },
+        }}
+        destroyOnHidden
+        forceRender={false}
+        title={
+          <div className="chart-tabbar">
+            <span className="chart-stock-name">{stock?.name || "—"}</span>
+            <span className="chart-stock-code">{stock?.code}</span>
+            <button
+              type="button"
+              className={tab === "trends" ? "chart-tab on" : "chart-tab"}
+              onClick={() => setTab("trends")}
+            >
+              分时
+            </button>
+            <button
+              type="button"
+              className={tab === "kline" ? "chart-tab on" : "chart-tab"}
+              onClick={() => setTab("kline")}
+            >
+              日K
+            </button>
+            {tab === "kline" ? (
+              <button
+                type="button"
+                className={chipOn ? "chart-chip-btn on" : "chart-chip-btn"}
+                onClick={() => setChipOn((v) => !v)}
+              >
+                筹码峰
+              </button>
+            ) : null}
           </div>
-        ) : null}
-        {tab === "kline" && klines?.length ? (
-          <KInfoBar bars={klines} index={kIndex} />
-        ) : null}
-        <div className="stock-chart-body">
-          <Spin spinning={loading} className="stock-chart-spin">
-            <div
-              ref={setBoxRef}
-              className="stock-chart-box"
-              key={`${stock?.code || "x"}-${tab}-${focusDay || "live"}-${open ? "1" : "0"}`}
+        }
+      >
+        <div className="stock-chart-sheet">
+          {tab === "trends" && dateLabel ? (
+            <div className="chart-k-info chart-trend-nav">
+              <button
+                type="button"
+                className="chart-day-nav"
+                aria-label="上一交易日"
+                disabled={!prevTradeDay}
+                onClick={goPrevDay}
+              >
+                <LeftOutlined />
+              </button>
+              <span className="k-date">分时 · {fmtViewDate(String(dateLabel))}</span>
+              {nextTradeDay ? (
+                <button
+                  type="button"
+                  className="chart-day-nav"
+                  aria-label="下一交易日"
+                  onClick={goNextDay}
+                >
+                  <RightOutlined />
+                </button>
+              ) : (
+                <span className="chart-day-nav-spacer" aria-hidden />
+              )}
+            </div>
+          ) : null}
+          {tab === "kline" && klines?.length ? (
+            <KInfoBar
+              bars={klines}
+              index={kIndex}
+              onViewTrend={(day) => setPeekDay(day)}
             />
-            {error ? <div className="chart-error">{error}</div> : null}
-          </Spin>
+          ) : null}
+          {tab === "kline" && chipOn && chipPayload?.result ? (
+            <ChipInfoBar cyq={chipPayload.result} />
+          ) : null}
+          <div className="stock-chart-body">
+            <Spin spinning={loading} className="stock-chart-spin">
+              <div
+                ref={setBoxRef}
+                className="stock-chart-box"
+                key={`${stock?.code || "x"}-${tab}-${focusDay || "live"}-${chipOn ? "chip" : "0"}-${open ? "1" : "0"}`}
+              />
+              {error ? <div className="chart-error">{error}</div> : null}
+            </Spin>
+          </div>
         </div>
-      </div>
-    </Modal>
+      </Modal>
+      {stock ? (
+        <DayTrendPeek
+          code={stock.code}
+          name={stock.name}
+          day={peekDay}
+          open={!!peekDay}
+          onClose={() => setPeekDay("")}
+          dark={dark}
+        />
+      ) : null}
+    </>
   );
 }

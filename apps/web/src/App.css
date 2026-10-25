@@ -773,6 +773,93 @@ body {
   color: var(--text);
 }
 
+.concept-theme-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.concept-theme-tag {
+  appearance: none;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--card-soft);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.3;
+  padding: 8px;
+  text-align: center;
+  cursor: pointer;
+  min-height: 40px;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+
+.concept-theme-tag:hover {
+  border-color: #e07040;
+  color: #e07040;
+}
+
+.concept-theme-tag.is-active {
+  border-color: #e04040;
+  color: #e04040;
+  background: rgba(224, 64, 64, 0.08);
+}
+
+.concept-theme-name {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.concept-theme-analysis {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card-soft);
+}
+
+.concept-theme-analysis-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.concept-theme-analysis-icon {
+  font-size: 12px;
+  font-weight: 600;
+  color: #e07030;
+}
+
+.concept-theme-analysis-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.concept-theme-analysis-body {
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--muted);
+}
+
+.concept-theme-collapse {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--link, #4a9eff);
+  font-size: 12px;
+  padding: 0;
+  margin-left: 6px;
+  cursor: pointer;
+}
+
+.concept-theme-collapse:hover {
+  text-decoration: underline;
+}
+
 .radar-asof {
   margin-left: 8px;
   font-size: 12px;
@@ -1561,12 +1648,27 @@ body {
   background: transparent;
 }
 
+.alert-stocks-table .ant-table-thead > tr > th:first-child,
+.alert-stocks-table .ant-table-tbody > tr > td:first-child {
+  width: 88px;
+  max-width: 88px;
+  padding-inline-end: 6px;
+}
+
+.alert-stock-name {
+  max-width: 88px;
+  overflow: hidden;
+}
+
 .alert-stock-name .nm {
   display: flex;
   align-items: center;
   gap: 4px;
   font-weight: 600;
   line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .alert-stock-name .mkt {
@@ -1721,6 +1823,106 @@ body {
 
 .chart-k-info .k-date {
   font-weight: 700;
+}
+
+.chart-trend-nav {
+  align-items: center;
+  gap: 6px;
+}
+
+.chart-day-nav {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.chart-day-nav:hover:not(:disabled) {
+  border-color: var(--text);
+}
+
+.chart-day-nav:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.chart-day-nav-spacer {
+  display: inline-block;
+  width: 26px;
+  height: 26px;
+}
+
+.chart-chip-btn {
+  margin-left: 8px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--text);
+  padding: 4px 12px;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1.4;
+  border-radius: 2px;
+}
+
+.chart-chip-btn:hover {
+  border-color: var(--text);
+}
+
+.chart-chip-btn.on {
+  border-color: var(--text);
+  font-weight: 650;
+  background: var(--panel);
+}
+
+.chart-chip-info {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 16px;
+  padding: 0 4px 6px;
+  font-size: 12px;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.chart-chip-info i {
+  font-style: normal;
+  color: var(--muted);
+  margin-left: 4px;
+  font-size: 11px;
+}
+
+.chart-view-trend-btn {
+  flex-shrink: 0;
+  margin: 0 4px 0 0;
+  padding: 1px 10px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.chart-view-trend-btn:hover {
+  border-color: var(--text);
+}
+
+.stock-trend-peek-modal .ant-modal-content {
+  height: 72vh;
+  display: flex;
+  flex-direction: column;
 }
 
 .stock-chart-box {

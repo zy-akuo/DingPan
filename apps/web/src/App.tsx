@@ -206,13 +206,14 @@ export default function App() {
 
   const openDetail = useCallback(async (stock: StockItem) => {
     setSelectedCode(stock.code);
-    // v2：含十大股东明细 / 曾用名，避免沿用旧缓存缺字段
-    const cacheKey = `fund:v2:${stock.code}`;
+    // v3：含十大股东 / 曾用名 / 概念题材，避免沿用旧缓存缺字段
+    const cacheKey = `fund:v3:${stock.code}`;
     const cached = cacheGet<StockItem>(cacheKey);
     const cacheOk =
       cached &&
       Array.isArray(cached.top10_holders) &&
-      Array.isArray(cached.former_names);
+      Array.isArray(cached.former_names) &&
+      Array.isArray(cached.concept_themes);
     setDetail(cacheOk ? { ...stock, ...cached } : stock);
     setDetailLoading(!cacheOk);
     try {
@@ -221,7 +222,11 @@ export default function App() {
         const data = (await res.json()) as StockItem;
         const merged = { ...stock, ...data };
         setDetail(merged);
-        if (Array.isArray(data.top10_holders) || Array.isArray(data.former_names)) {
+        if (
+          Array.isArray(data.top10_holders) ||
+          Array.isArray(data.former_names) ||
+          Array.isArray(data.concept_themes)
+        ) {
           cacheSet(cacheKey, data, 30 * 60);
         }
       }

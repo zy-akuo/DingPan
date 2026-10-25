@@ -20,6 +20,8 @@ export interface StockItem {
   open_times: number;
   industry: string;
   concepts: string[];
+  /** 概念题材（同花顺；详情抽屉独立展示） */
+  concept_themes?: ConceptTheme[] | null;
   zt_stats: string;
   status: StockStatus;
   board_tag: string;
@@ -59,6 +61,16 @@ export interface TopHolder {
   shares: number | null;
   change?: string;
   shares_type?: string;
+}
+
+export interface ConceptTheme {
+  name: string;
+  most_relevant?: boolean;
+  analysis?: string;
+  short?: string;
+  cid?: number | null;
+  board_code?: string | null;
+  labels?: string[];
 }
 
 export interface HistoryGroup {

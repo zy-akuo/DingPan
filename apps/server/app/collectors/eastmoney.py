@@ -584,88 +584,285 @@ class EastMoneyClient:
                 "trade_date": day,
             }
 
-        # 1) 东财（可能不稳定）
-        em = await self._fetch_trends_eastmoney(code)
-        if self._trends_usable(em):
-            return em
-        # 2) 腾讯多日分时（盘前/东财挂掉时主力）
+        # 最新分时：腾讯优先（近窗稳），再东财 / 新浪
         qq = await self._fetch_trends_tencent_days(code)
         if self._trends_usable(qq):
+            await self._persist_trend(code, str(qq.get("trade_date") or ""), qq)
             return qq
-        # 3) 新浪 1 分钟
+        em = await self._fetch_trends_eastmoney(code)
+        if self._trends_usable(em):
+            await self._persist_trend(code, str(em.get("trade_date") or ""), em)
+            return em
         sina = await self._fetch_trends_sina(code)
         if self._trends_usable(sina):
+            await self._persist_trend(code, str(sina.get("trade_date") or ""), sina)
             return sina
-        # 返回「最像样」的一份（可能仍为空）
         for cand in (qq, em, sina):
             if cand and (cand.get("points") or []):
+                await self._persist_trend(code, str(cand.get("trade_date") or ""), cand)
                 return cand
         return {"code": code, "name": "", "pre_close": 0, "points": [], "trade_date": ""}
 
     async def _fetch_trends_on_date(self, code: str, day: str) -> dict[str, Any]:
-        """按指定交易日取分时：腾讯多日 → 东财 trends2 → 东财 1 分钟 K。"""
+        """按指定交易日取分时。
+
+        多平台接力（腾讯日分时 → 腾讯分钟K → 新浪 → 东财 trends → 东财分钟K），
+        成功结果写入本地 trend_history，保证同一交易日可反复稳定回放。
+        """
         code = code.zfill(6)
         day = self._norm_day_str(day)
         empty = {"code": code, "name": "", "pre_close": 0, "points": [], "trade_date": day}
         if not day:
             return empty
+        compact = day.replace("-", "")
 
-        # 1) 腾讯最近约 5 个交易日分时
+        # 0) 本地落库（任意历史日一旦拉成功即可回放）
+        try:
+            from ..db import load_trend_history
+
+            cached = await load_trend_history(code, compact)
+            if cached and cached.get("points"):
+                return cached
+        except Exception:
+            pass
+
+        cands: list[dict[str, Any]] = []
+
+        # 1) 腾讯多日分时（近约 5 个交易日，最稳）
         qq = await self._fetch_trends_tencent_days(code, prefer_day=day)
+        cands.append(qq)
         if qq.get("points") and self._norm_day_str(str(qq.get("trade_date") or "")) == day:
+            await self._persist_trend(code, day, qq)
             return qq
 
-        # 2) 东财近几日 trends，精确匹配目标日
+        # 2) 腾讯分钟 K（mkline m1）
+        qq_m = await self._fetch_trends_tencent_mkline(code, day)
+        cands.append(qq_m)
+        if qq_m.get("points"):
+            await self._persist_trend(code, day, qq_m)
+            return qq_m
+
+        # 3) 新浪 1 分钟（近窗）
+        sina = await self._fetch_trends_sina(code, prefer_day=day)
+        cands.append(sina)
+        if sina.get("points") and self._norm_day_str(str(sina.get("trade_date") or "")) == day:
+            await self._persist_trend(code, day, sina)
+            return sina
+
+        # 4) 东财 trends2（近约 5 日）
         em = await self._fetch_trends_eastmoney(code, prefer_day=day)
+        cands.append(em)
         if em.get("points") and self._norm_day_str(str(em.get("trade_date") or "")) == day:
+            await self._persist_trend(code, day, em)
             return em
 
-        # 3) 东财 1 分钟 K（任意历史日，上游可用时）
+        # 5) 东财 1 分钟 K（任意历史日；严格按行内日期过滤）
         minute = await self._fetch_trends_minute_kline(code, day)
+        cands.append(minute)
         if minute.get("points"):
+            await self._persist_trend(code, day, minute)
             return minute
 
-        # 带回名称（若有）
-        for cand in (qq, em, minute):
+        for cand in cands:
             if cand and cand.get("name"):
                 empty["name"] = cand["name"]
                 break
         return empty
 
+    async def _persist_trend(self, code: str, day: str, payload: dict[str, Any]) -> None:
+        points = payload.get("points") or []
+        if not points:
+            return
+        try:
+            from ..db import save_trend_history
+
+            await save_trend_history(
+                code,
+                day.replace("-", ""),
+                list(points),
+                pre_close=float(payload.get("pre_close") or 0),
+                name=str(payload.get("name") or ""),
+            )
+        except Exception:
+            pass
+
+    async def _fetch_trends_tencent_mkline(self, code: str, day: str) -> dict[str, Any]:
+        """腾讯 mkline 1 分钟：近若干交易日可用，按目标日过滤。"""
+        code = code.zfill(6)
+        day = self._norm_day_str(day)
+        empty = {"code": code, "name": "", "pre_close": 0, "points": [], "trade_date": day}
+        if not day:
+            return empty
+        compact = day.replace("-", "")
+        sym = self._to_qq_symbol(code)
+        headers = dict(HEADERS)
+        headers["Referer"] = "https://finance.qq.com/"
+        raw_rows: list[Any] = []
+        name = ""
+        prec = 0.0
+        for url, params in (
+            (
+                "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/kline/mkline",
+                {"param": f"{sym},m1,,800"},
+            ),
+            (
+                "https://web.ifzq.gtimg.cn/appstock/app/kline/mkline",
+                {"param": f"{sym},m1,,800"},
+            ),
+        ):
+            try:
+                client = await self._ensure_client()
+                resp = await client.get(url, params=params, headers=headers, timeout=12.0)
+                resp.raise_for_status()
+                payload = resp.json()
+                node = ((payload.get("data") or {}).get(sym)) or {}
+                raw_rows = node.get("m1") or []
+                try:
+                    prec = float(node.get("prec") or 0)
+                except (TypeError, ValueError):
+                    prec = 0.0
+                qt = (node.get("qt") or {}).get(sym) or []
+                if isinstance(qt, list) and len(qt) > 1:
+                    name = str(qt[1] or "")
+                if raw_rows:
+                    break
+            except Exception:
+                continue
+        if not raw_rows:
+            return empty
+
+        points: list[dict[str, Any]] = []
+        cum_vol = 0.0
+        cum_amt = 0.0
+        for row in raw_rows:
+            if not isinstance(row, (list, tuple)) or len(row) < 5:
+                continue
+            ts = str(row[0] or "")
+            # 202610201344 or 2026-10-20 13:44
+            ds = ts.replace("-", "").replace(" ", "")[:8]
+            if ds != compact:
+                continue
+            hm = ts.replace("-", "").replace(" ", "")[8:12]
+            if len(hm) == 4 and hm.isdigit():
+                time_label = f"{hm[:2]}:{hm[2:]}"
+            else:
+                continue
+            try:
+                close = float(row[1] or row[4] or 0)
+            except (TypeError, ValueError):
+                continue
+            try:
+                vol = float(row[5] or 0)  # 手
+            except (TypeError, ValueError):
+                vol = 0.0
+            vol_shares = vol * 100.0
+            cum_vol += vol_shares
+            cum_amt += close * vol_shares
+            avg = (cum_amt / cum_vol) if cum_vol > 0 else close
+            pt: dict[str, Any] = {
+                "time": time_label,
+                "price": close,
+                "avg": round(avg, 3),
+                "volume": vol_shares,
+            }
+            if close > 0 and vol_shares > 0:
+                pt["amount"] = round(close * vol_shares, 2)
+            points.append(pt)
+
+        if not points:
+            return empty
+        return {
+            "code": code,
+            "name": name,
+            "pre_close": prec,
+            "points": points,
+            "trade_date": day,
+        }
+
     async def _fetch_trends_minute_kline(self, code: str, day: str) -> dict[str, Any]:
-        """用东财 1 分钟 K 拼分时（beg=end=指定日）。"""
+        """用东财 1 分钟 K 拼分时（任意历史日）。
+
+        上游偶发忽略 beg/end；必须按行内日期过滤。优先 beg=0&end=日&lmt=240。
+        """
         code = code.zfill(6)
         day = self._norm_day_str(day)
         compact = day.replace("-", "")
         empty = {"code": code, "name": "", "pre_close": 0, "points": [], "trade_date": day}
         if len(compact) != 8:
             return empty
-        params = {
-            "secid": to_secid(code),
-            "klt": "1",
-            "fqt": "1",
-            "lmt": "300",
-            "beg": compact,
-            "end": compact,
-            "fields1": "f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13",
-            "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
-            "ut": UT_QUOTE,
-            "rtntype": "6",
-        }
-        data: dict[str, Any] = {}
-        for base in (
+
+        attempts: list[dict[str, str]] = []
+        for ut in (UT, UT_QUOTE):
+            for fqt in ("1", "0"):
+                # beg=0 + end=目标日：取截止该日的最近 lmt 根，再按日过滤（兼容性更好）
+                attempts.append(
+                    {
+                        "beg": "0",
+                        "end": compact,
+                        "lmt": "240",
+                        "fqt": fqt,
+                        "ut": ut,
+                    }
+                )
+                attempts.append(
+                    {
+                        "beg": compact,
+                        "end": compact,
+                        "lmt": "300",
+                        "fqt": fqt,
+                        "ut": ut,
+                    }
+                )
+
+        payload: dict[str, Any] = {}
+        raw_lines: list[Any] = []
+        hosts = (
             "https://push2his.eastmoney.com/api/qt/stock/kline/get",
             "https://push2delay.eastmoney.com/api/qt/stock/kline/get",
             "https://push2.eastmoney.com/api/qt/stock/kline/get",
-        ):
-            try:
-                data = await self._get(base, params, referer="https://quote.eastmoney.com/")
-                if (data.get("data") or {}).get("klines"):
-                    break
-            except Exception:
+            "https://75.push2his.eastmoney.com/api/qt/stock/kline/get",
+        )
+        for att in attempts:
+            params = {
+                "secid": to_secid(code),
+                "klt": "1",
+                "fqt": att["fqt"],
+                "lmt": att["lmt"],
+                "beg": att["beg"],
+                "end": att["end"],
+                "fields1": "f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13",
+                "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
+                "ut": att["ut"],
+                "rtntype": "6",
+            }
+            data: dict[str, Any] = {}
+            for base in hosts:
+                try:
+                    data = await self._get(base, params, referer="https://quote.eastmoney.com/")
+                    if (data.get("data") or {}).get("klines"):
+                        break
+                except Exception:
+                    continue
+            payload = data.get("data") or {}
+            cand_lines = payload.get("klines") or []
+            if not cand_lines:
                 continue
-        payload = data.get("data") or {}
-        raw_lines = payload.get("klines") or []
+            # 先粗筛：是否含目标日
+            has_day = False
+            for line in cand_lines:
+                parts = str(line).split(",")
+                if not parts:
+                    continue
+                ld = self._norm_day_str(
+                    parts[0].split(" ")[0] if " " in parts[0] else parts[0][:10]
+                )
+                if ld == day:
+                    has_day = True
+                    break
+            if has_day:
+                raw_lines = cand_lines
+                break
+
         if not raw_lines:
             return empty
 
@@ -677,6 +874,9 @@ class EastMoneyClient:
             if len(parts) < 6:
                 continue
             dt = parts[0]
+            line_day = self._norm_day_str(dt.split(" ")[0] if " " in dt else dt[:10])
+            if line_day != day:
+                continue
             time_label = dt.split(" ")[-1] if " " in dt else dt
             if len(time_label) >= 5:
                 time_label = time_label[:5]
@@ -697,22 +897,40 @@ class EastMoneyClient:
             }
             if amt > 0:
                 pt["amount"] = amt
+            elif close > 0 and vol > 0:
+                pt["amount"] = round(close * vol * 100.0, 2)
             points.append(pt)
 
+        if not points:
+            return empty
+
         pre_close = 0.0
+        day_bar: dict[str, Any] | None = None
         try:
-            daily = await self.fetch_kline(code, limit=10)
+            daily = await self.fetch_kline(code, limit=250)
             bars = list(daily.get("bars") or [])
             for i, b in enumerate(bars):
                 bd = self._norm_day_str(str(b.get("date") or ""))
-                if bd == day and i > 0:
-                    pre_close = float(bars[i - 1].get("close") or 0)
+                if bd == day:
+                    day_bar = b
+                    if i > 0:
+                        pre_close = float(bars[i - 1].get("close") or 0)
                     break
-                if bd == day and i == 0 and len(bars) > 1:
-                    # 目标日是窗口第一根时无法取昨收
-                    pass
         except Exception:
             pass
+
+        # 仅拦截极端错日（已按行内日期过滤；放宽阈值避免误杀）
+        if day_bar is not None and points:
+            try:
+                d_high = float(day_bar.get("high") or 0)
+                d_low = float(day_bar.get("low") or 0)
+                t_high = max(float(p.get("price") or 0) for p in points)
+                t_low = min(float(p.get("price") or 0) for p in points)
+                if d_high > 0 and d_low > 0:
+                    if t_high > d_high * 1.5 or t_low < d_low * 0.5:
+                        return empty
+            except (TypeError, ValueError):
+                pass
 
         return {
             "code": code,
@@ -861,6 +1079,7 @@ class EastMoneyClient:
                 pre_by_day[day] = 0.0
             points: list[dict[str, Any]] = []
             prev_vol = 0.0
+            prev_amt = 0.0
             for line in item.get("data") or []:
                 parts = str(line).split()
                 if len(parts) < 2:
@@ -884,16 +1103,21 @@ class EastMoneyClient:
                     cum_amt = 0.0
                 vol_hands = max(0.0, cum_vol - prev_vol)
                 prev_vol = cum_vol
+                amt = max(0.0, cum_amt - prev_amt)
+                if cum_amt > 0:
+                    prev_amt = cum_amt
                 avg = (cum_amt / (cum_vol * 100)) if cum_vol > 0 else price
+                vol_shares = vol_hands * 100
                 pt: dict[str, Any] = {
                     "time": time_label,
                     "price": price,
                     "avg": round(avg, 3),
-                    "volume": vol_hands * 100,
+                    "volume": vol_shares,
                 }
-                if cum_amt > 0:
-                    # 累计额差近似当分钟成交额
-                    pass
+                if amt > 0:
+                    pt["amount"] = amt
+                elif price > 0 and vol_shares > 0:
+                    pt["amount"] = round(price * vol_shares, 2)
                 points.append(pt)
             if points and day:
                 by_day[day] = points
@@ -902,6 +1126,19 @@ class EastMoneyClient:
         qt = (node.get("qt") or {}).get(sym) or []
         if isinstance(qt, list) and len(qt) > 1:
             name = str(qt[1] or "")
+
+        # 一次请求把近几日全写入本地，翻日/回看不丢
+        for d, pts in by_day.items():
+            if pts:
+                await self._persist_trend(
+                    code,
+                    d,
+                    {
+                        "name": name,
+                        "pre_close": pre_by_day.get(d) or 0,
+                        "points": pts,
+                    },
+                )
 
         if prefer and prefer in by_day and by_day[prefer]:
             return {
@@ -924,11 +1161,15 @@ class EastMoneyClient:
             "trade_date": day,
         }
 
-    async def _fetch_trends_sina(self, code: str) -> dict[str, Any]:
+    async def _fetch_trends_sina(
+        self, code: str, prefer_day: str | None = None
+    ) -> dict[str, Any]:
         code = code.zfill(6)
+        prefer = self._norm_day_str(prefer_day)
         prefix = "sh" if code.startswith("6") else "sz"
         headers = dict(HEADERS)
         headers["Referer"] = "https://finance.sina.com.cn"
+        rows: list[Any] = []
         try:
             client = await self._ensure_client()
             resp = await client.get(
@@ -950,6 +1191,7 @@ class EastMoneyClient:
             if " " not in day_full:
                 continue
             day, time_label = day_full.split(" ", 1)
+            day = self._norm_day_str(day) or day
             time_label = time_label[:5]
             try:
                 price = float(row.get("close") or row.get("open") or 0)
@@ -959,14 +1201,21 @@ class EastMoneyClient:
                 volume = float(row.get("volume") or 0)
             except (TypeError, ValueError):
                 volume = 0.0
-            by_day[day].append(
-                {
-                    "time": time_label,
-                    "price": price,
-                    "avg": price,  # 下方按日重算 VWAP
-                    "volume": volume,
-                }
-            )
+            try:
+                amount = float(row.get("amount") or 0)
+            except (TypeError, ValueError):
+                amount = 0.0
+            pt: dict[str, Any] = {
+                "time": time_label,
+                "price": price,
+                "avg": price,  # 下方按日重算 VWAP
+                "volume": volume,
+            }
+            if amount > 0:
+                pt["amount"] = amount
+            elif price > 0 and volume > 0:
+                pt["amount"] = round(price * volume, 2)
+            by_day[day].append(pt)
         # 新浪无均价字段：按日用价×量累计成 VWAP，避免黄线贴着现价抖
         for day, pts in by_day.items():
             cum_vol = 0.0
@@ -978,11 +1227,16 @@ class EastMoneyClient:
                     cum_vol += vol
                     cum_amt += price * vol
                 pt["avg"] = round((cum_amt / cum_vol) if cum_vol > 0 else price, 3)
-        picked = self._pick_trend_day(dict(by_day))
-        if not picked:
-            return {"code": code, "name": "", "pre_close": 0, "points": [], "trade_date": ""}
-        day, points = picked
-        # 昨收：取上一日收盘
+
+        if prefer and prefer in by_day and by_day[prefer]:
+            day = prefer
+            points = by_day[prefer]
+        else:
+            picked = self._pick_trend_day(dict(by_day))
+            if not picked:
+                return {"code": code, "name": "", "pre_close": 0, "points": [], "trade_date": ""}
+            day, points = picked
+
         days_sorted = sorted(by_day.keys())
         pre_close = 0.0
         if day in days_sorted:

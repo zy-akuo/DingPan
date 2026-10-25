@@ -2402,6 +2402,16 @@ class MarketService:
 
         data = await self.client.fetch_fundamentals(code)
         data["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        # 同花顺概念题材（全量 + 解析）；失败时保留旧缓存
+        try:
+            from ..collectors.ths import ThsClient
+
+            if self._ths is None:
+                self._ths = ThsClient()
+            themes = await self._ths.fetch_concept_themes(code)
+            data["concept_themes"] = themes  # 含空列表，表示已拉取；不覆盖基本面 concepts
+        except Exception:
+            pass
         # 若新结果缺字段而旧缓存有，合并保留（错误的自由流通不继承）
         try:
             old = await get_fundamentals(code)
@@ -2412,6 +2422,7 @@ class MarketService:
                 "region",
                 "industry",
                 "concepts",
+                "concept_themes",
                 "free_float_mv",
                 "top10_holder_pct",
                 "top10_major_holder_pct",
@@ -2441,8 +2452,12 @@ class MarketService:
         code = code.zfill(6)
         # 先出列表快照，再合并缓存/网络基本面，避免 force 全量打接口
         fund = await self.refresh_fundamentals(code, force=False)
-        # 旧缓存缺股东明细 / 曾用名时强制补拉一次（抽屉专用字段）
-        if fund.get("top10_holders") is None or fund.get("former_names") is None:
+        # 旧缓存缺股东明细 / 曾用名 / 概念题材时强制补拉一次（抽屉专用字段）
+        if (
+            fund.get("top10_holders") is None
+            or fund.get("former_names") is None
+            or fund.get("concept_themes") is None
+        ):
             fund = await self.refresh_fundamentals(code, force=True)
         base = None
         for bucket in (self.snapshot.zt, self.snapshot.lb, self.snapshot.zb, self.snapshot.dt):
@@ -2468,6 +2483,7 @@ class MarketService:
             "region",
             "industry",
             "concepts",
+            "concept_themes",
             "year_seal_rate",
             "year_board_rate",
             "change_pct",
@@ -2478,11 +2494,13 @@ class MarketService:
             derived = _fund_major_holder_pct(fund)
             if derived is not None:
                 base["top10_major_holder_pct"] = derived
-        # 允许空列表写回（表示已拉取且无曾用名 / 无股东）
+        # 允许空列表写回（表示已拉取且无曾用名 / 无股东 / 无题材）
         if isinstance(fund.get("top10_holders"), list):
             base["top10_holders"] = fund["top10_holders"]
         if isinstance(fund.get("former_names"), list):
             base["former_names"] = fund["former_names"]
+        if isinstance(fund.get("concept_themes"), list):
+            base["concept_themes"] = fund["concept_themes"]
         if fund.get("top10_holders_date"):
             base["top10_holders_date"] = fund["top10_holders_date"]
         if fund.get("name"):
@@ -3423,8 +3441,57 @@ class MarketService:
         }
 
     async def _resolve_prev_auction_date(self, today: str) -> str:
-        """上一交易日（优先有竞价快照的日期，否则日历回退）。"""
+        """上一真实交易日（不用竞价快照日驱动展示，避免库停在旧快照如 10-16）。"""
         today = (today or "").replace("-", "")[:8]
+
+        def _is_weekday(ds: str) -> bool:
+            try:
+                return datetime.strptime(ds, "%Y%m%d").weekday() < 5
+            except Exception:
+                return False
+
+        # 1) 主盘已解析的真实交易日（含周末镜像去重）
+        snap = (self.snapshot.trade_date or "").replace("-", "")[:8]
+        if snap and snap < today and _is_weekday(snap):
+            return snap
+        try:
+            ds, _zt, _zb, _dt = await self._resolve_trade_pools()
+            ds = (ds or "").replace("-", "")[:8]
+            if ds and ds < today and _is_weekday(ds):
+                return ds
+            # ds==today（工作日盘前）→ 再往前找上一交易日
+            if ds == today or (ds and ds >= today):
+                anchor = ds if ds and ds <= today else today
+                try:
+                    d0 = datetime.strptime(anchor, "%Y%m%d").date()
+                except Exception:
+                    d0 = datetime.now().date()
+                first_weekday = ""
+                for i in range(1, 16):
+                    cand = (d0 - timedelta(days=i)).strftime("%Y%m%d")
+                    if not _is_weekday(cand):
+                        continue
+                    if not first_weekday:
+                        first_weekday = cand
+                    rows, zb, dt = await self._fetch_pools(cand)
+                    if rows or zb or dt:
+                        return cand
+                if first_weekday:
+                    return first_weekday
+        except Exception:
+            pass
+
+        # 2) 日历回退（跳过周末）
+        try:
+            d0 = datetime.strptime(today, "%Y%m%d").date()
+        except Exception:
+            return ""
+        for i in range(1, 15):
+            cand = (d0 - timedelta(days=i)).strftime("%Y%m%d")
+            if _is_weekday(cand):
+                return cand
+
+        # 3) 最后才用竞价快照日（仅兜底，不优先）
         try:
             saved = await load_auction_dates(limit=20)
         except Exception:
@@ -3433,18 +3500,6 @@ class MarketService:
             ds = str(d or "").replace("-", "")[:8]
             if ds and ds < today:
                 return ds
-        try:
-            d0 = datetime.strptime(today, "%Y%m%d").date()
-        except Exception:
-            return ""
-        for i in range(1, 15):
-            cand = (d0 - timedelta(days=i)).strftime("%Y%m%d")
-            try:
-                if datetime.strptime(cand, "%Y%m%d").weekday() >= 5:
-                    continue
-            except Exception:
-                continue
-            return cand
         return ""
 
     def _clear_auction_for_warming(self, today: str) -> None:
@@ -4145,9 +4200,130 @@ class MarketService:
         col["seal_total"] = sum(self._auction_seal_latest(x) for x in yizhi_items)
         return col
 
+    async def _synthesize_auction_snapshot(self, req_date: str) -> bool:
+        """缺快照时按「开盘价≈9:25 撮合」重建并落库 0925，对齐周末展示最近交易日。
+
+        0915/0920 封单已无法还原，仅合成 0925 列（涨幅/一字/撮合额）。
+        """
+        ds = (req_date or "").replace("-", "")[:8]
+        if len(ds) != 8:
+            return False
+        try:
+            zt_rows = await list_zt_history_by_date(ds)
+        except Exception:
+            zt_rows = []
+        seed: list[str] = []
+        seen: set[str] = set()
+        for r in zt_rows:
+            c = str(r.get("code") or "").zfill(6)
+            if c.isdigit() and c not in seen:
+                seen.add(c)
+                seed.append(c)
+
+        em_yizi: list[dict[str, Any]] = []
+        em_rank: list[dict[str, Any]] = []
+        try:
+            em_yizi = await self.client.fetch_em_auction_yizhi()
+        except Exception:
+            em_yizi = []
+        try:
+            em_rank = await self.client.fetch_em_auction_pct_rank(limit=150)
+        except Exception:
+            em_rank = []
+        yizi_codes = {
+            str(y.get("code") or "").zfill(6) for y in em_yizi if y.get("code")
+        }
+        for y in list(em_yizi) + list(em_rank):
+            c = str(y.get("code") or "").zfill(6)
+            if c.isdigit() and c not in seen:
+                seen.add(c)
+                seed.append(c)
+
+        try:
+            pool = await self.client.fetch_auction_market_pool(
+                limit=350,
+                use_open=True,
+                seed_codes=seed[:400],
+            )
+        except Exception:
+            pool = []
+        if not pool and not em_yizi and not em_rank:
+            return False
+
+        # jjyd 仍有数据时优先用其竞价涨幅/一字；否则用开盘价池，开盘触板视为一字
+        by_code: dict[str, dict[str, Any]] = {}
+        for y in em_rank:
+            c = str(y.get("code") or "").zfill(6)
+            if not c.isdigit():
+                continue
+            by_code[c] = {
+                **y,
+                "is_yizhi": c in yizi_codes,
+                "seal_amount": float(y.get("seal_amount") or 0)
+                if c in yizi_codes
+                else 0.0,
+            }
+        for y in em_yizi:
+            c = str(y.get("code") or "").zfill(6)
+            if not c.isdigit():
+                continue
+            by_code[c] = {
+                **y,
+                "is_yizhi": True,
+                "seal_amount": float(y.get("seal_amount") or 0),
+            }
+        for r in pool:
+            c = str(r.get("code") or "").zfill(6)
+            if not c.isdigit():
+                continue
+            if c in by_code:
+                # 补市值/行业等
+                cur = by_code[c]
+                for k in ("float_mv", "industry", "market", "name", "amount"):
+                    if not cur.get(k) and r.get(k):
+                        cur[k] = r.get(k)
+                continue
+            price = float(r.get("price") or 0)
+            limit_up = float(r.get("limit_up") or 0)
+            pct = float(r.get("auction_pct") or 0)
+            at_limit = limit_up > 0 and price > 0 and abs(price - limit_up) <= 0.015
+            is_yizhi = bool(c in yizi_codes or (at_limit and pct >= 9.0))
+            item = dict(r)
+            item["is_yizhi"] = is_yizhi
+            if not is_yizhi:
+                item["seal_amount"] = 0.0
+            by_code[c] = item
+
+        rows = list(by_code.values())
+        if not rows:
+            return False
+        try:
+            rows = await self._enrich_auction_rows(rows)
+        except Exception:
+            pass
+        # 落库 0925，供后续稳定展示
+        try:
+            await replace_auction_slot(
+                ds,
+                "0925",
+                rows,
+                updated_at=f"{ds[0:4]}-{ds[4:6]}-{ds[6:8]} 09:25:30",
+            )
+        except Exception:
+            return False
+        return True
+
     async def _load_history_auction_column(self, req_date: str) -> dict[str, Any]:
-        """历史日：只用当日落库快照；丢弃非竞价窗口 seal。"""
+        """历史日：优先落库快照；缺省时盘后重建 0925（周末展示最近交易日）。"""
         db_slots = await load_auction_day(req_date)
+        has_any = any(db_slots.get(s) for s in ("0915", "0920", "0925"))
+        if not has_any:
+            try:
+                ok = await self._synthesize_auction_snapshot(req_date)
+                if ok:
+                    db_slots = await load_auction_day(req_date)
+            except Exception:
+                pass
         trusted = self._trusted_auction_seal_map(db_slots, req_date)
         cleaned: dict[str, list[dict[str, Any]]] = {
             "0915": [],
@@ -4375,6 +4551,19 @@ class MarketService:
                         x["seal_0920"] = None
                         x["seal_0925"] = None
                 col = self._finalize_auction_column_sort(col)
+                # 盘后把 0925 落库，避免周末/次日早盘缺快照
+                if synth_rows and not (db_slots.get("0925") or []):
+                    try:
+                        await replace_auction_slot(
+                            req_date,
+                            "0925",
+                            synth_rows,
+                            updated_at=f"{req_date[0:4]}-{req_date[4:6]}-{req_date[6:8]} 09:25:30"
+                            if len(req_date) == 8
+                            else datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        )
+                    except Exception:
+                        pass
         else:
             col = await self._load_history_auction_column(req_date)
 

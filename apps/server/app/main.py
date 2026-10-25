@@ -298,7 +298,8 @@ async def stock_trends(code: str, date: str = ""):
     day = (date or "").replace("-", "").strip()
     if day and (len(day) != 8 or not day.isdigit()):
         day = ""
-    key = f"trends:{code}:{day or 'latest'}"
+    # v3：腾讯优先多源 + 本地 trend_history
+    key = f"trends:v3:{code}:{day or 'latest'}"
     hit = await ttl_cache.get(key)
     # 空结果不命中缓存，避免盘前空数据挡住上一交易日回退
     if (

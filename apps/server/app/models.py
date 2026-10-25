@@ -33,6 +33,8 @@ class StockItem(BaseModel):
     open_times: int = 0
     industry: str = ""
     concepts: list[str] = Field(default_factory=list)
+    # 概念题材（同花顺 conceptdetail；详情抽屉独立展示）
+    concept_themes: list[dict[str, Any]] | None = None
     zt_stats: str = ""  # e.g. 3/10
     status: StockStatus = StockStatus.SUCCESS
     board_tag: str = ""  # 硬板/回封/首板

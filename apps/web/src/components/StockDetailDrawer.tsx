@@ -2,7 +2,7 @@ import { Drawer, Spin, Tag } from "antd";
 import * as echarts from "echarts";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { cacheGet, cacheSet } from "../lib/localCache";
-import type { StockItem, TopHolder } from "../types";
+import type { ConceptTheme, StockItem, TopHolder } from "../types";
 import { formatMoney, formatPct } from "../types";
 
 const LABELS: Record<string, string> = {
@@ -409,6 +409,95 @@ function sumMajorHolderPct(holders?: TopHolder[] | null): number | null {
   return hit ? Math.round(sum * 100) / 100 : 0;
 }
 
+function ConceptThemesBlock({
+  themes,
+  fallbackNames,
+  loading,
+}: {
+  themes?: ConceptTheme[] | null;
+  fallbackNames?: string[];
+  loading?: boolean;
+}) {
+  const [active, setActive] = useState<string | null>(null);
+
+  useEffect(() => {
+    setActive(null);
+  }, [themes, fallbackNames]);
+
+  const items: ConceptTheme[] =
+    themes && themes.length
+      ? themes
+      : (fallbackNames || []).map((name) => ({
+          name,
+          most_relevant: false,
+          analysis: "",
+        }));
+
+  if (!items.length && !loading) {
+    return (
+      <div className="radar-block">
+        <div className="radar-block-title">概念题材</div>
+        <div className="muted">暂无概念题材</div>
+      </div>
+    );
+  }
+
+  const selected = active
+    ? items.find((t) => t.name === active) || null
+    : null;
+
+  return (
+    <div className="radar-block concept-themes-block">
+      <div className="radar-block-title">概念题材</div>
+      {loading && !items.length ? (
+        <div className="muted">
+          <Spin size="small" /> 加载概念题材…
+        </div>
+      ) : (
+        <>
+          <div className="concept-theme-grid">
+            {items.map((t) => {
+              const isActive = active === t.name;
+              return (
+                <button
+                  key={t.name}
+                  type="button"
+                  className={`concept-theme-tag${isActive ? " is-active" : ""}`}
+                  onClick={() =>
+                    setActive((prev) => (prev === t.name ? null : t.name))
+                  }
+                >
+                  <span className="concept-theme-name">{t.name}</span>
+                </button>
+              );
+            })}
+          </div>
+          {selected ? (
+            <div className="concept-theme-analysis">
+              <div className="concept-theme-analysis-head">
+                <span className="concept-theme-analysis-icon">概念解析</span>
+                <span className="concept-theme-analysis-title">
+                  {selected.name}
+                </span>
+              </div>
+              <div className="concept-theme-analysis-body">
+                {selected.analysis || selected.short || "暂无概念解析"}
+                <button
+                  type="button"
+                  className="concept-theme-collapse"
+                  onClick={() => setActive(null)}
+                >
+                  收起 ˄
+                </button>
+              </div>
+            </div>
+          ) : null}
+        </>
+      )}
+    </div>
+  );
+}
+
 function HoldersBlock({
   holders,
   endDate,
@@ -593,6 +682,11 @@ export function StockDetailDrawer({
               ))}
             </div>
           </div>
+          <ConceptThemesBlock
+            themes={stock.concept_themes}
+            fallbackNames={stock.concepts}
+            loading={loading}
+          />
           <FormerNamesBlock names={stock.former_names} loading={loading} />
           <HoldersBlock
             holders={stock.top10_holders}

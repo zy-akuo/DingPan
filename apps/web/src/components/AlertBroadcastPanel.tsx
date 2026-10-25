@@ -317,6 +317,7 @@ export function AlertBroadcastPanel({
       {
         title: "名称",
         dataIndex: "name",
+        width: 88,
         ellipsis: true,
         render: (name: string, r) => (
           <div className="alert-stock-name">
@@ -332,7 +333,7 @@ export function AlertBroadcastPanel({
       {
         title: "涨跌幅",
         dataIndex: "change_pct",
-        width: 72,
+        width: 68,
         align: "right",
         render: (v: number) => (
           <span className={v >= 0 ? "up" : "down"}>{formatPct(v)}</span>
@@ -341,7 +342,7 @@ export function AlertBroadcastPanel({
       {
         title: "",
         key: "actions",
-        width: 108,
+        width: 96,
         align: "right",
         render: (_, r) => (
           <Space size={0} onClick={(e) => e.stopPropagation()}>
@@ -427,7 +428,7 @@ export function AlertBroadcastPanel({
               pagination={false}
               dataSource={rows}
               columns={stockCols}
-              scroll={{ y: "calc(100vh - 300px)", x: 360 }}
+              scroll={{ y: "calc(100vh - 300px)", x: 280 }}
               locale={{ emptyText: "请添加要监控的股票" }}
               rowClassName={(r) =>
                 [

@@ -152,6 +152,81 @@ class ThsClient:
         payload = data.get("data") or {}
         return list(payload.get("info") or [])
 
+    async def fetch_concept_themes(self, code: str) -> list[dict[str, Any]]:
+        """个股概念题材（F10 conceptdetail）：名称、最相关、解析正文。"""
+        code = str(code or "").zfill(6)
+        if not code.isdigit():
+            return []
+        url = f"https://basic.10jqka.com.cn/api/stockph/conceptdetail/{code}"
+        client = await self._ensure_client()
+        try:
+            resp = await client.get(
+                url,
+                headers={
+                    **THS_HEADERS,
+                    "Referer": f"https://basic.10jqka.com.cn/mobile/{code}/concept.html",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception:
+            return []
+        if data.get("errorcode") not in (0, "0", None, ""):
+            return []
+        raw_list = data.get("data")
+        if not isinstance(raw_list, list):
+            return []
+        out: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in raw_list:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("title") or "").strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            labels = item.get("label") or []
+            label_names: list[str] = []
+            if isinstance(labels, list):
+                for lb in labels:
+                    if isinstance(lb, dict) and lb.get("name"):
+                        label_names.append(str(lb["name"]).strip())
+                    elif isinstance(lb, str) and lb.strip():
+                        label_names.append(lb.strip())
+            most_relevant = "最相关" in label_names or item.get("bond") in (1, "1", True)
+            long_txt = str(item.get("long") or "").strip()
+            short_txt = str(item.get("short") or "").strip()
+            analysis = long_txt or short_txt
+            board_code = ""
+            quote = str(item.get("quote") or "")
+            for part in quote.split(","):
+                part = part.strip()
+                if "_" not in part:
+                    continue
+                pref, rest = part.split("_", 1)
+                if pref in ("48", "bk") or rest.startswith(("885", "886")):
+                    board_code = rest
+                    break
+            cid = item.get("cid")
+            try:
+                cid_n = int(cid) if cid is not None and str(cid).strip() != "" else None
+            except (TypeError, ValueError):
+                cid_n = None
+            out.append(
+                {
+                    "name": name,
+                    "most_relevant": bool(most_relevant),
+                    "analysis": analysis,
+                    "short": short_txt,
+                    "cid": cid_n,
+                    "board_code": board_code or None,
+                    "labels": label_names,
+                }
+            )
+        if out and not any(x.get("most_relevant") for x in out):
+            out[0]["most_relevant"] = True
+        return out
+
 
 def ths_ts_to_hms(raw: Any) -> str:
     """同花顺封板/炸板时间：unix 秒 → HH:MM:SS。"""

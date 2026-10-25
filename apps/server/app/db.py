@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS stock_fundamentals (
     top10_holders TEXT,
     top10_holders_date TEXT,
     former_names TEXT,
+    concept_themes TEXT,
     updated_at TEXT
 );
 
@@ -85,6 +86,17 @@ CREATE TABLE IF NOT EXISTS auction_snapshots (
     PRIMARY KEY (trade_date, slot, code)
 );
 CREATE INDEX IF NOT EXISTS idx_auction_date ON auction_snapshots(trade_date);
+
+CREATE TABLE IF NOT EXISTS trend_history (
+    code TEXT NOT NULL,
+    trade_date TEXT NOT NULL,
+    name TEXT,
+    pre_close REAL,
+    points_json TEXT NOT NULL,
+    updated_at TEXT,
+    PRIMARY KEY (code, trade_date)
+);
+CREATE INDEX IF NOT EXISTS idx_trend_history_date ON trend_history(trade_date);
 """
 
 
@@ -105,6 +117,7 @@ async def init_db() -> None:
             ("top10_holders_date", "TEXT"),
             ("former_names", "TEXT"),
             ("top10_major_holder_pct", "REAL"),
+            ("concept_themes", "TEXT"),
         ]:
             if col not in cols:
                 alters.append(f"ALTER TABLE stock_fundamentals ADD COLUMN {col} {typ}")
@@ -176,6 +189,76 @@ async def load_auction_dates(limit: int = 10) -> list[str]:
         )
         rows = await cur.fetchall()
     return [str(r[0]) for r in rows]
+
+
+async def save_trend_history(
+    code: str,
+    trade_date: str,
+    points: list[dict],
+    *,
+    pre_close: float = 0.0,
+    name: str = "",
+) -> None:
+    """Persist one day's intraday points for reliable historical replay."""
+    ds = (trade_date or "").replace("-", "")[:8]
+    c = (code or "").zfill(6)
+    if len(ds) != 8 or not c.isdigit() or not points:
+        return
+    from datetime import datetime as _dt
+
+    async with aiosqlite.connect(settings.db_path) as db:
+        await db.execute(
+            """
+            INSERT INTO trend_history(code, trade_date, name, pre_close, points_json, updated_at)
+            VALUES (?,?,?,?,?,?)
+            ON CONFLICT(code, trade_date) DO UPDATE SET
+                name=excluded.name,
+                pre_close=excluded.pre_close,
+                points_json=excluded.points_json,
+                updated_at=excluded.updated_at
+            """,
+            (
+                c,
+                ds,
+                name or "",
+                float(pre_close or 0),
+                json.dumps(points, ensure_ascii=False),
+                _dt.now().strftime("%Y-%m-%d %H:%M:%S"),
+            ),
+        )
+        await db.commit()
+
+
+async def load_trend_history(code: str, trade_date: str) -> dict | None:
+    ds = (trade_date or "").replace("-", "")[:8]
+    c = (code or "").zfill(6)
+    if len(ds) != 8 or not c.isdigit():
+        return None
+    async with aiosqlite.connect(settings.db_path) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """
+            SELECT name, pre_close, points_json FROM trend_history
+            WHERE code=? AND trade_date=?
+            """,
+            (c, ds),
+        )
+        row = await cur.fetchone()
+    if not row:
+        return None
+    try:
+        points = json.loads(row["points_json"] or "[]")
+    except Exception:
+        return None
+    if not isinstance(points, list) or not points:
+        return None
+    return {
+        "code": c,
+        "name": str(row["name"] or ""),
+        "pre_close": float(row["pre_close"] or 0),
+        "points": points,
+        "trade_date": f"{ds[0:4]}-{ds[4:6]}-{ds[6:8]}",
+    }
 
 
 async def load_auction_day(trade_date: str) -> dict[str, list[dict]]:
@@ -491,6 +574,13 @@ def _parse_fundamentals_row(row: aiosqlite.Row | dict) -> dict:
             data["former_names"] = []
     elif "former_names" in data and data["former_names"] is None:
         data["former_names"] = None
+    if data.get("concept_themes"):
+        try:
+            data["concept_themes"] = json.loads(data["concept_themes"])
+        except json.JSONDecodeError:
+            data["concept_themes"] = []
+    elif "concept_themes" in data and data["concept_themes"] is None:
+        data["concept_themes"] = None
     return data
 
 
@@ -552,15 +642,23 @@ async def upsert_fundamentals(code: str, payload: dict) -> None:
         former_json = None
     else:
         former_json = str(former)
+    themes = payload.get("concept_themes")
+    if isinstance(themes, list):
+        themes_json = json.dumps(themes, ensure_ascii=False)
+    elif themes is None:
+        themes_json = None
+    else:
+        themes_json = str(themes)
     async with aiosqlite.connect(settings.db_path) as db:
         await db.execute(
             """
             INSERT INTO stock_fundamentals(
                 code, name, region, industry, concepts, price, total_mv, float_mv,
                 free_float_mv, top10_holder_pct, top10_major_holder_pct,
-                top10_holders, top10_holders_date, former_names, updated_at
+                top10_holders, top10_holders_date, former_names, concept_themes,
+                updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(code) DO UPDATE SET
                 name=excluded.name,
                 region=excluded.region,
@@ -575,6 +673,7 @@ async def upsert_fundamentals(code: str, payload: dict) -> None:
                 top10_holders=excluded.top10_holders,
                 top10_holders_date=excluded.top10_holders_date,
                 former_names=excluded.former_names,
+                concept_themes=excluded.concept_themes,
                 updated_at=excluded.updated_at
             """,
             (
@@ -592,6 +691,7 @@ async def upsert_fundamentals(code: str, payload: dict) -> None:
                 holders_json,
                 payload.get("top10_holders_date") or "",
                 former_json,
+                themes_json,
                 payload.get("updated_at"),
             ),
         )
