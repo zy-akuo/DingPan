@@ -39,18 +39,105 @@ def _source_layout() -> tuple[Path, Path, Path] | None:
     return None
 
 
+def _node_major(node_exe: Path) -> int:
+    try:
+        out = subprocess.run(
+            [str(node_exe), "-v"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=8,
+        )
+        raw = (out.stdout or out.stderr or "").strip().lstrip("v")
+        return int(raw.split(".")[0]) if raw else 0
+    except Exception:
+        return 0
+
+
+def _iter_node_candidates(root: Path) -> list[Path]:
+    """收集可用 node.exe：便携目录 → nvm 多版本 → PATH。"""
+    found: list[Path] = []
+    seen: set[str] = set()
+
+    def add(p: Path) -> None:
+        try:
+            key = str(p.resolve()).lower()
+        except OSError:
+            key = str(p).lower()
+        if key in seen or not p.is_file():
+            return
+        seen.add(key)
+        found.append(p)
+
+    for rel in (
+        Path(".tools") / "node" / "bin" / "node",
+        Path(".tools") / "node" / "node.exe",
+        Path(".tools") / "nodejs" / "node.exe",
+    ):
+        add(root / rel)
+
+    nvm_roots = [
+        Path(os.environ.get("NVM_HOME", "")),
+        Path(os.environ.get("APPDATA", "")) / "nvm",
+        Path(r"D:\nvm\nvm"),
+        Path(r"C:\nvm4w"),
+        Path(r"C:\nvm"),
+    ]
+    for nvm in nvm_roots:
+        if not nvm.is_dir():
+            continue
+        versions: list[tuple[tuple[int, int, int], Path]] = []
+        for child in nvm.iterdir():
+            if not child.is_dir():
+                continue
+            name = child.name[1:] if child.name.startswith("v") else child.name
+            parts = name.split(".")
+            if len(parts) != 3 or not all(p.isdigit() for p in parts):
+                continue
+            exe = child / "node.exe"
+            if exe.is_file():
+                versions.append(((int(parts[0]), int(parts[1]), int(parts[2])), exe))
+        for _, exe in sorted(versions, reverse=True):
+            add(exe)
+
+    for name in ("node", "node.exe"):
+        which = shutil.which(name)
+        if which:
+            add(Path(which))
+    return found
+
+
 def _build_command() -> tuple[list[str], dict] | None:
-    """返回 (构建命令, 环境变量)。优先项目便携 Node（.tools/node，由 scripts/dev.sh 安装）。"""
+    """返回 (构建命令, 环境变量)。优先 Node >= 20（Vite 8）；避免系统 Node 14 假成功。"""
     root = Path(__file__).resolve().parents[2]
     env = os.environ.copy()
-    node = root / ".tools" / "node" / "bin" / "node"
-    npm_cli = root / ".tools" / "node" / "lib" / "node_modules" / "npm" / "bin" / "npm-cli.js"
-    if node.exists() and npm_cli.exists():
-        env["PATH"] = str(node.parent) + os.pathsep + env.get("PATH", "")
-        return [str(node), str(npm_cli), "run", "build"], env
-    npm = shutil.which("npm") or shutil.which("npm.cmd")
-    if npm:
-        return [npm, "run", "build"], env
+    min_major = 20
+    for node in _iter_node_candidates(root):
+        if _node_major(node) < min_major:
+            continue
+        node_dir = str(node.parent)
+        env["PATH"] = node_dir + os.pathsep + env.get("PATH", "")
+        npm_cli = (
+            root
+            / ".tools"
+            / "node"
+            / "lib"
+            / "node_modules"
+            / "npm"
+            / "bin"
+            / "npm-cli.js"
+        )
+        if node.name == "node" and npm_cli.is_file() and node.parent.name == "bin":
+            return [str(node), str(npm_cli), "run", "build"], env
+        npm = node.parent / "npm.cmd"
+        if not npm.is_file():
+            npm = node.parent / "npm"
+        if npm.is_file():
+            return [str(npm), "run", "build"], env
+        which_npm = shutil.which("npm") or shutil.which("npm.cmd")
+        if which_npm:
+            return [which_npm, "run", "build"], env
     return None
 
 
@@ -102,17 +189,44 @@ def ensure_frontend_build() -> None:
         return  # 产物已是最新，秒过
     build = _build_command()
     if not build:
-        print("[DingPan] 未找到 npm，跳过前端构建（界面可能空白，请先运行 make setup 或安装 Node.js 20.19+）")
+        print(
+            "[DingPan] 未找到 Node.js >= 20 / npm，跳过前端构建"
+            "（界面可能为旧版本；可用 nvm install 22 && nvm use 22）"
+        )
         return
     cmd, env = build
+    # Windows 默认 GBK 解码 npm/vite 的 UTF-8 日志会炸；强制 UTF-8 并容错替换
+    env = dict(env)
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    env.setdefault("PYTHONUTF8", "1")
+    before = _dir_newest(dist) if dist.exists() else 0.0
     print("[DingPan] 检测到前端有更新，正在构建（静默）...")
-    proc = subprocess.run(cmd, cwd=web, env=env, capture_output=True, text=True)
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=web,
+            env=env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except OSError as e:
+        print(f"[DingPan] 前端构建无法启动，继续启动（界面可能为旧版本或空白）：{e}")
+        return
     if proc.returncode != 0:
         tail = (proc.stderr or proc.stdout or "").strip()[-1500:]
         print(f"[DingPan] 前端构建失败，继续启动（界面可能为旧版本或空白）：\n{tail}")
         return
-    if not dist.exists():
+    if not dist.exists() or not (dist / "index.html").exists():
         print("[DingPan] 构建未产生 dist 目录，跳过同步")
+        return
+    after = _dir_newest(dist)
+    if after <= before:
+        print(
+            "[DingPan] 前端 dist 未更新（可能 Node 过旧导致构建静默失败），"
+            "跳过同步；请使用 Node >= 20 后重试"
+        )
         return
     _sync_dist(dist, web_dist)
     print("[DingPan] 前端构建完成")

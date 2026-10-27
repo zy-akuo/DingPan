@@ -34,20 +34,82 @@ function Write-Ok([string]$msg) {
     Write-Host "    OK  $msg" -ForegroundColor Green
 }
 
+function Get-NodeMajor([string]$NodeExe) {
+    try {
+        $raw = & $NodeExe -v 2>$null
+        if (-not $raw) { return 0 }
+        return [int]($raw.ToString().TrimStart("v").Split(".")[0])
+    } catch {
+        return 0
+    }
+}
+
+function Resolve-NvmRoot {
+    foreach ($cand in @(
+            (Join-Path $env:APPDATA "nvm"),
+            "D:\nvm\nvm",
+            "C:\nvm4w",
+            "C:\nvm"
+        )) {
+        if ($cand -and (Test-Path (Join-Path $cand "nvm.exe"))) { return $cand }
+        if ($cand -and (Test-Path (Join-Path $cand "settings.txt"))) { return $cand }
+    }
+    $nvmCmd = Get-Command nvm -ErrorAction SilentlyContinue
+    if ($nvmCmd -and $nvmCmd.Source) {
+        $dir = Split-Path -Parent $nvmCmd.Source
+        if (Test-Path $dir) { return $dir }
+    }
+    return $null
+}
+
 function Add-NodeToPath {
+    # Vite 8 需要 Node >= 20；优先选够用的版本，避免 nvm 默认停在 14 导致「假成功」旧包
+    $minMajor = 20
+    $candidates = New-Object System.Collections.Generic.List[string]
+
+    $nvmRoot = Resolve-NvmRoot
+    if ($nvmRoot) {
+        Get-ChildItem $nvmRoot -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^v?\d+\.\d+\.\d+$' } |
+            Sort-Object {
+                $n = $_.Name.TrimStart("v")
+                try { [version]$n } catch { [version]"0.0.0" }
+            } -Descending |
+            ForEach-Object {
+                $exe = Join-Path $_.FullName "node.exe"
+                if (Test-Path $exe) { [void]$candidates.Add($exe) }
+            }
+    }
+
     foreach ($dir in @(
+            (Join-Path $Root ".tools\nodejs"),
+            (Join-Path $Root ".tools\node"),
             "C:\Program Files\nodejs",
             "C:\Program Files (x86)\nodejs",
             "C:\nvm4w\nodejs",
-            "$env:APPDATA\nvm",
             "$env:LOCALAPPDATA\Programs\nodejs",
             "$env:LOCALAPPDATA\Programs\node"
         )) {
-        if ($dir -and (Test-Path (Join-Path $dir "node.exe"))) {
-            $env:Path = "$dir;" + $env:Path
-            return
+        $exe = Join-Path $dir "node.exe"
+        if (Test-Path $exe) { [void]$candidates.Add($exe) }
+    }
+
+    $which = Get-Command node -ErrorAction SilentlyContinue
+    if ($which -and $which.Source) { [void]$candidates.Add($which.Source) }
+
+    $picked = $null
+    foreach ($exe in $candidates) {
+        if ((Get-NodeMajor $exe) -ge $minMajor) {
+            $picked = $exe
+            break
         }
     }
+    if (-not $picked) {
+        throw "需要 Node.js >= 20（当前过旧或未安装）。可用 nvm: nvm install 22 && nvm use 22"
+    }
+    $dir = Split-Path -Parent $picked
+    $env:Path = "$dir;" + $env:Path
+    Write-Host "    node: $picked ($(& $picked -v))"
 }
 
 function Sync-WebDist {
@@ -89,8 +151,12 @@ if (-not $SkipBuild) {
     Write-Step "Build frontend"
     Add-NodeToPath
     $node = Get-Command node -ErrorAction SilentlyContinue
-    if (-not $node) { throw "node.exe not found. Install Node.js 18+." }
-    Write-Host "    node: $($node.Source)"
+    if (-not $node) { throw "node.exe not found. Install Node.js 20+." }
+    $beforeStamp = 0.0
+    if (Test-Path $WebDist) {
+        Get-ChildItem $WebDist -Recurse -File -ErrorAction SilentlyContinue |
+            ForEach-Object { if ($_.LastWriteTime.ToFileTimeUtc() -gt $beforeStamp) { $beforeStamp = $_.LastWriteTime.ToFileTimeUtc() } }
+    }
 
     Push-Location $WebDir
     try {
@@ -104,6 +170,16 @@ if (-not $SkipBuild) {
     }
     finally {
         Pop-Location
+    }
+
+    if (-not (Test-Path (Join-Path $WebDist "index.html"))) {
+        throw "frontend build produced no dist/index.html (Node 是否过旧？需要 >= 20)"
+    }
+    $afterStamp = 0.0
+    Get-ChildItem $WebDist -Recurse -File -ErrorAction SilentlyContinue |
+        ForEach-Object { if ($_.LastWriteTime.ToFileTimeUtc() -gt $afterStamp) { $afterStamp = $_.LastWriteTime.ToFileTimeUtc() } }
+    if ($afterStamp -le $beforeStamp) {
+        throw "frontend dist 未更新（构建可能静默失败，请确认 Node >= 20）"
     }
     Write-Ok "frontend built"
 

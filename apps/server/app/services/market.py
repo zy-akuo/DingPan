@@ -5,7 +5,11 @@ from datetime import datetime, time, timedelta
 from typing import Any
 
 from ..collectors import EastMoneyClient, today_yyyymmdd
-from ..collectors.eastmoney import classify_risk_type, risk_hint_for
+from ..collectors.eastmoney import (
+    classify_risk_type,
+    infer_limit_up,
+    risk_hint_for,
+)
 from ..db import (
     calc_year_rates,
     count_history_dates,
@@ -1271,7 +1275,12 @@ class MarketService:
         new: list[LadderGroup],
         trade_date: str,
     ) -> list[LadderGroup]:
-        """防止轮询偶发瘦包把某档（尤其仅含「败」的 N进N+1）整行弄丢。"""
+        """防止轮询偶发瘦包把某档（尤其仅含「败」的 N进N+1）整行弄丢。
+
+        回补「败」时：
+        - 已出现在新天梯任意档的代码不再回补（避免一字多档，如良品铺子同时在 3进4 与 1进2）
+        - 仅回补到与当前昨日涨停池 board_count 一致的档位（避免陈旧错误板数占坑）
+        """
         if not prev:
             return new
         if self.snapshot.trade_date and self.snapshot.trade_date != trade_date:
@@ -1283,24 +1292,64 @@ class MarketService:
             return list(prev)
 
         new_map = {g.key: g for g in new}
+        # 全表已有代码：防止跨档重复
+        present = {s.code for g in new for s in g.stocks}
+        # 昨日板数口径（有则强制档位一致）
+        y_level = {
+            str(r.get("code") or "").zfill(6): max(1, int(r.get("board_count") or 1))
+            for r in (self._y_zt or [])
+            if str(r.get("code") or "").zfill(6).isdigit()
+        }
         changed = False
 
         for g in prev:
             if g.key == "first" or not g.stocks:
                 continue
+            try:
+                expect_level = int(str(g.key).split("-")[0])
+            except (TypeError, ValueError):
+                continue
             cur = new_map.get(g.key)
             if cur is None:
-                # 整档消失（常见：昨日池瞬时空 → 仅败股档没了）
-                new_map[g.key] = g
+                # 整档消失：只保留仍属于该档的「败」，且不能与其他档冲突
+                kept = []
+                for s in g.stocks:
+                    if s.status != StockStatus.FAIL:
+                        continue
+                    if s.code in present:
+                        continue
+                    yl = y_level.get(s.code)
+                    if yl is not None and yl != expect_level:
+                        continue
+                    kept.append(s)
+                    present.add(s.code)
+                if not kept:
+                    continue
+                success = sum(1 for s in kept if s.status == StockStatus.SUCCESS)
+                total = len(kept)
+                rate = (
+                    f"{success}/{total}={round(success / total * 100)}%"
+                    if total
+                    else "0/0=0%"
+                )
+                new_map[g.key] = g.model_copy(
+                    update={"stocks": kept, "promotion_rate": rate}
+                )
                 changed = True
                 continue
             have = {s.code for s in cur.stocks}
-            # 只回补「败」：成/炸应由今日池驱动，避免用陈旧成/炸盖住真实状态
-            extra = [
-                s
-                for s in g.stocks
-                if s.code not in have and s.status == StockStatus.FAIL
-            ]
+            # 只回补「败」：成/炸应由今日池驱动；且不得跨档、不得与昨日板数矛盾
+            extra = []
+            for s in g.stocks:
+                if s.code in have or s.code in present:
+                    continue
+                if s.status != StockStatus.FAIL:
+                    continue
+                yl = y_level.get(s.code)
+                if yl is not None and yl != expect_level:
+                    continue
+                extra.append(s)
+                present.add(s.code)
             if not extra:
                 continue
             stocks = list(cur.stocks) + extra
@@ -3809,24 +3858,45 @@ class MarketService:
                     continue
                 last = float(q.get("price") or 0)
                 live_pct = float(q.get("change_pct") or 0)
-                if abs(live_pct) < 1e-12 and last > 0:
-                    prev = float(q.get("prev_close") or 0)
-                    if prev > 0:
-                        live_pct = round((last - prev) / prev * 100, 2)
+                prev = float(q.get("prev_close") or 0)
+                if abs(live_pct) < 1e-12 and last > 0 and prev > 0:
+                    live_pct = round((last - prev) / prev * 100, 2)
+                # 竞价撮合价优先用 jjyd；腾讯补涨停价/买一未匹配额
+                auction_price = float(y.get("price") or 0)
+                price = auction_price if auction_price > 0 else last
+                limit_up = float(q.get("limit_up") or 0)
+                if limit_up <= 0 and prev > 0:
+                    limit_up = infer_limit_up(code, name, prev)
+                buy1 = float(q.get("buy1") or 0)
+                seal = float(q.get("seal_amount") or 0)
+                # 竞价中东财 sk=1 常为空；触板+买一未匹配 → 一字（与观察池口径一致）
+                at_limit = (
+                    limit_up > 0 and price > 0 and abs(price - limit_up) <= 0.015
+                )
+                buy_at_limit = (
+                    limit_up > 0 and buy1 > 0 and abs(buy1 - limit_up) <= 0.015
+                )
+                if not (at_limit or buy_at_limit):
+                    seal = 0.0
+                is_yizhi = bool(
+                    seal > 0 and (at_limit or (buy_at_limit and pct >= 9.0))
+                )
                 by[code] = {
                     **y,
-                    "is_yizhi": False,
-                    "seal_amount": 0.0,
+                    "is_yizhi": is_yizhi,
+                    "seal_amount": seal if is_yizhi else 0.0,
                     "auction_pct": pct,
                     "amount": float(y.get("amount") or 0),
-                    "price": float(y.get("price") or last or 0),
-                    "last_price": last if last > 0 else float(y.get("price") or 0),
+                    "price": price,
+                    "last_price": last if last > 0 else price,
                     "change_pct": live_pct,
                     "float_mv": float(q.get("float_mv") or 0),
                     "industry": str(q.get("industry") or y.get("industry") or ""),
                     "concepts": [],
                     "market": str(q.get("market") or y.get("market") or ""),
                     "name": name,
+                    "prev_close": prev,
+                    "limit_up": limit_up,
                 }
             for y in em_yizi:
                 code = str(y.get("code") or "").zfill(6)
