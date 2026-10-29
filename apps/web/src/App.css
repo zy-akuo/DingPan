@@ -1530,6 +1530,197 @@ body {
 .watch-panel .ant-table-tbody > tr > td {
   font-variant-numeric: tabular-nums;
 }
+.speed-panel .ant-table {
+  table-layout: fixed;
+}
+
+.speed-live-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.speed-live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+.speed-live-dot.is-ok {
+  background: #22c55e;
+  opacity: 1;
+}
+.speed-live-dot.is-bad {
+  background: #ef4444;
+  opacity: 1;
+}
+.speed-live-dot.is-pulse {
+  animation: speed-live-pulse 0.48s ease-out;
+}
+@keyframes speed-live-pulse {
+  0% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 color-mix(in srgb, #22c55e 55%, transparent);
+  }
+  70% {
+    transform: scale(1.35);
+    box-shadow: 0 0 0 6px transparent;
+  }
+  100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+.speed-fail-hint {
+  color: #ef4444;
+}
+
+.speed-flash-up {
+  animation: speed-flash-up 0.45s ease-out;
+}
+.speed-flash-down {
+  animation: speed-flash-down 0.45s ease-out;
+}
+@keyframes speed-flash-up {
+  0% {
+    background: color-mix(in srgb, #ef4444 35%, transparent);
+  }
+  100% {
+    background: transparent;
+  }
+}
+@keyframes speed-flash-down {
+  0% {
+    background: color-mix(in srgb, #22c55e 35%, transparent);
+  }
+  100% {
+    background: transparent;
+  }
+}
+
+.cell-pending {
+  color: var(--muted);
+  letter-spacing: 0.05em;
+  font-variant-numeric: tabular-nums;
+  display: inline-block;
+  min-width: 2.5em;
+  text-align: right;
+}
+
+.monitor-table-wrap {
+  position: relative;
+}
+.monitor-table-wrap.is-loading-overlay {
+  pointer-events: none;
+}
+.table-loading-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  z-index: 3;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--accent, #d97706) 80%, transparent),
+    transparent
+  );
+  background-size: 40% 100%;
+  animation: table-loading-slide 0.9s linear infinite;
+}
+@keyframes table-loading-slide {
+  0% {
+    background-position: -40% 0;
+  }
+  100% {
+    background-position: 140% 0;
+  }
+}
+.table-loading-mask {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  background: color-mix(in srgb, var(--colorBgContainer, #f3f4f6) 45%, transparent);
+  pointer-events: none;
+}
+
+.speed-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 8px 4px 16px;
+}
+.speed-skeleton-row {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+.speed-skeleton .sk {
+  height: 14px;
+  border-radius: 4px;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--muted) 18%, transparent),
+    color-mix(in srgb, var(--muted) 32%, transparent),
+    color-mix(in srgb, var(--muted) 18%, transparent)
+  );
+  background-size: 200% 100%;
+  animation: speed-skeleton-shine 1.2s ease-in-out infinite;
+}
+.speed-skeleton .sk-name {
+  width: 120px;
+}
+.speed-skeleton .sk-num {
+  width: 56px;
+}
+.speed-skeleton .sk-wide {
+  flex: 1;
+  max-width: 220px;
+}
+@keyframes speed-skeleton-shine {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: -100% 0;
+  }
+}
+
+.speed-hidden-pop {
+  width: 240px;
+  max-width: 70vw;
+}
+.speed-hidden-list {
+  max-height: 240px;
+  overflow: auto;
+  margin-bottom: 8px;
+}
+.speed-hidden-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--muted) 20%, transparent);
+}
+.speed-hidden-name {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.25;
+  font-size: 13px;
+}
+.speed-hidden-name small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.drawer-footer-actions {
+  display: flex;
+  gap: 8px;
+}
 
 .monitor-table-wrap .monitor-row-selected > td {
   background: var(--row-selected) !important;

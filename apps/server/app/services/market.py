@@ -521,7 +521,12 @@ class MarketService:
 
     async def _fetch_pools(
         self, ds: str
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]] | None:
+        """拉取指定日涨停/炸板/跌停池。
+
+        返回三元组；传输/超时失败返回 None（与「该日确实无数据」的空列表区分），
+        避免把瞬时失败当成休市而回退到昨日交易日。
+        """
         try:
             zt_rows, zb_rows, dt_rows = await asyncio.wait_for(
                 asyncio.gather(
@@ -533,7 +538,7 @@ class MarketService:
             )
             return list(zt_rows or []), list(zb_rows or []), list(dt_rows or [])
         except Exception:
-            return [], [], []
+            return None
 
     async def _resolve_trade_pools(
         self,
@@ -542,27 +547,62 @@ class MarketService:
 
         东财在周末/节假常把上一交易日数据挂到日历日上；用相邻日指纹去重，
         避免 trade_date 显示成不开盘的今天，以及「今=昨」导致天梯错位。
-        """
-        from datetime import timedelta
 
-        probe = datetime.now().date()
+        工作日开盘后优先认日历日（只要与上一交易日指纹不同）；单日请求失败会跳过
+        该日继续探测，而不是把失败当成空池直接回退。
+        """
+        now = datetime.now()
+        probe = now.date()
+        cal_ds = probe.strftime("%Y%m%d")
+        after_open = probe.weekday() < 5 and now.time() >= time(9, 15)
+
         last: tuple[str, list, list, list, tuple] | None = None
+        cal_pack: tuple[str, list, list, list, tuple] | None = None
+        transient = False
+
         for _ in range(16):
             ds = probe.strftime("%Y%m%d")
-            zt_rows, zb_rows, dt_rows = await self._fetch_pools(ds)
+            fetched = await self._fetch_pools(ds)
+            if fetched is None:
+                transient = True
+                probe = probe - timedelta(days=1)
+                continue
+            zt_rows, zb_rows, dt_rows = fetched
             if zt_rows or zb_rows or dt_rows:
                 fp = _pool_fingerprint(zt_rows, zb_rows)
+                pack = (ds, zt_rows, zb_rows, dt_rows, fp)
+                if ds == cal_ds:
+                    cal_pack = pack
                 if last is None:
-                    last = (ds, zt_rows, zb_rows, dt_rows, fp)
+                    last = pack
                 elif fp == last[4]:
                     # 与更新的日历日内容相同 → 更新日是镜像，改为更早的真实日
-                    last = (ds, zt_rows, zb_rows, dt_rows, fp)
+                    last = pack
                 else:
                     # 更早一日内容不同 → last 即为最新真实交易日
                     break
             probe = probe - timedelta(days=1)
 
+        # 工作日开盘后：日历日已拉到且内容不同于更早真实日 → 强制用日历日
+        # （避免首日请求曾失败时，循环只收下昨日并一直停住）
+        if after_open and cal_pack is not None:
+            if last is None or cal_pack[0] == last[0] or cal_pack[4] != last[4]:
+                last = cal_pack
+
+        # 开盘后仍落到更早日期时，再强拉一次日历日（本轮首请求失败的补偿）
+        if after_open and (last is None or last[0] < cal_ds):
+            retry = await self._fetch_pools(cal_ds)
+            if retry is not None:
+                zt_rows, zb_rows, dt_rows = retry
+                if zt_rows or zb_rows or dt_rows:
+                    fp = _pool_fingerprint(zt_rows, zb_rows)
+                    if last is None or fp != last[4]:
+                        last = (cal_ds, zt_rows, zb_rows, dt_rows, fp)
+
         if not last:
+            # 仅遇瞬时失败时抛给 refresh，避免用空结果覆盖已有快照
+            if transient:
+                raise TimeoutError("trade pool fetch transient failure")
             return today_yyyymmdd(), [], [], []
         return last[0], last[1], last[2], last[3]
 
@@ -586,7 +626,11 @@ class MarketService:
 
         for _ in range(16):
             ds = d.strftime("%Y%m%d")
-            rows, zb, dt = await self._fetch_pools(ds)
+            fetched = await self._fetch_pools(ds)
+            if fetched is None:
+                d = d - timedelta(days=1)
+                continue
+            rows, zb, dt = fetched
             if rows or zb or dt:
                 if _pool_fingerprint(rows, zb) == trade_fp:
                     # 仍是 trade_date 的镜像，继续往前
@@ -1769,6 +1813,8 @@ class MarketService:
 
     async def refresh(self) -> MarketSnapshot:
         async with self._lock:
+            prev_date = (self.snapshot.trade_date or "").strip()
+            prev_has = bool(self.snapshot.zt or self.snapshot.zb or self.snapshot.dt)
             try:
                 date, zt_rows, zb_rows, dt_rows = await self._resolve_trade_pools()
             except Exception:
@@ -1776,8 +1822,11 @@ class MarketService:
 
             # 空结果不要覆盖已有有效快照（防止限流/瞬时失败把盘面清空）
             if not zt_rows and not zb_rows and not dt_rows:
-                if self.snapshot.zt or self.snapshot.zb or self.snapshot.dt:
-                    return self.snapshot
+                return self.snapshot
+
+            # 禁止交易日回退：当日池瞬时失败时 resolve 可能落到昨日，
+            # 若已有更新的有效快照会把连板天梯「打回」上一交易日。
+            if prev_has and prev_date and date and date < prev_date:
                 return self.snapshot
 
             # 昨日池必须相对「真实交易日」，否则周末今=昨会导致炸板全进首板、无晋级失败
@@ -3522,7 +3571,10 @@ class MarketService:
                         continue
                     if not first_weekday:
                         first_weekday = cand
-                    rows, zb, dt = await self._fetch_pools(cand)
+                    fetched = await self._fetch_pools(cand)
+                    if fetched is None:
+                        continue
+                    rows, zb, dt = fetched
                     if rows or zb or dt:
                         return cand
                 if first_weekday:

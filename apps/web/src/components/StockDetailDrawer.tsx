@@ -1,4 +1,4 @@
-import { Drawer, Spin, Tag } from "antd";
+import { Button, Drawer, Spin, Tag } from "antd";
 import * as echarts from "echarts";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { cacheGet, cacheSet } from "../lib/localCache";
@@ -561,12 +561,15 @@ export function StockDetailDrawer({
   open,
   loading,
   onClose,
+  onHideFromSpeed,
 }: {
   stock: StockItem | null;
   fields: string[];
   open: boolean;
   loading?: boolean;
   onClose: () => void;
+  /** 仅涨速榜场景传入：从列表隐藏该股 */
+  onHideFromSpeed?: (stock: StockItem) => void;
 }) {
   const [radar, setRadar] = useState<RadarData | null>(null);
   const [radarLoading, setRadarLoading] = useState(false);
@@ -643,6 +646,22 @@ export function StockDetailDrawer({
       open={open}
       onClose={onClose}
       width={460}
+      footer={
+        stock && onHideFromSpeed ? (
+          <div className="drawer-footer-actions">
+            <Button
+              danger
+              block
+              onClick={() => {
+                onHideFromSpeed(stock);
+                onClose();
+              }}
+            >
+              从涨速榜隐藏
+            </Button>
+          </div>
+        ) : null
+      }
     >
       {(loading || radarLoading) && (
         <div className="muted" style={{ marginBottom: 12 }}>

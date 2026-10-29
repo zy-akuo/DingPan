@@ -152,6 +152,11 @@ export default function App() {
   const [filter, setFilter] = useState<MonitorFilter>(EMPTY_FILTER);
   const [chartStock, setChartStock] = useState<StockItem | null>(null);
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => loadTheme());
+  const [speedHideRequest, setSpeedHideRequest] = useState<{
+    code: string;
+    name: string;
+    token: number;
+  } | null>(null);
   const [, startTransition] = useTransition();
 
   const pushRef = useRef<(events: import("./types").SpeechEvent[]) => void>(() => undefined);
@@ -482,6 +487,8 @@ export default function App() {
               selectedCode={selectedCode}
               pollSec={fields.speed_poll_interval_sec ?? 1.5}
               showStStocks={showStStocks}
+              hideRequest={speedHideRequest}
+              onHideRequestHandled={() => setSpeedHideRequest(null)}
             />
           </section>
         ) : mainTab === "auction" ? (
@@ -511,6 +518,18 @@ export default function App() {
           open={!!detail}
           loading={detailLoading}
           onClose={() => setDetail(null)}
+          onHideFromSpeed={
+            mainTab === "speed"
+              ? (s) => {
+                  setSpeedHideRequest({
+                    code: s.code,
+                    name: s.name,
+                    token: Date.now(),
+                  });
+                  setSelectedCode(null);
+                }
+              : undefined
+          }
         />
 
         <StockChartModal

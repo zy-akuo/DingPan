@@ -6,6 +6,7 @@ import {
   useLayoutEffect,
   useMemo,
   useRef,
+  useState,
   type ReactNode,
 } from "react";
 import { useTableDragScroll } from "../hooks/useTableDragScroll";
@@ -26,11 +27,24 @@ function NameBoardMarks({ stock }: { stock: StockItem }) {
   );
 }
 
+function pendingOr(
+  v: number | null | undefined,
+  fmt: (n: number) => ReactNode,
+  emptyAsDots: boolean,
+): ReactNode {
+  if (v == null || Number.isNaN(v)) {
+    return emptyAsDots ? <span className="cell-pending">···</span> : "—";
+  }
+  return fmt(v);
+}
+
 function buildColumns(
   keys: string[],
   onOpenChart?: (s: StockItem) => void,
   extraActions?: (s: StockItem) => ReactNode,
   showNameBoardMarks = false,
+  speedFlash?: Record<string, "up" | "down">,
+  emptyAsDots = false,
 ): ColumnsType<StockItem> {
   const ALL: Record<string, ColumnsType<StockItem>[number]> = {
     name: {
@@ -130,7 +144,8 @@ function buildColumns(
       title: "自由流通",
       dataIndex: "free_float_mv",
       width: 100,
-      render: (v: number | null) => formatMoney(v),
+      render: (v: number | null) =>
+        pendingOr(v, (n) => formatMoney(n), emptyAsDots),
     },
     price: {
       title: "股价",
@@ -149,71 +164,92 @@ function buildColumns(
     speed: {
       title: "涨速",
       dataIndex: "speed",
-      width: 72,
-      render: (v: number | null | undefined) => {
-        if (v == null || Number.isNaN(v)) return "—";
-        return <span className={v >= 0 ? "up" : "down"}>{formatPct(v)}</span>;
+      width: 80,
+      render: (v: number | null | undefined, r: StockItem) => {
+        if (v == null || Number.isNaN(v)) {
+          return emptyAsDots ? <span className="cell-pending">···</span> : "—";
+        }
+        const flash = speedFlash?.[r.code];
+        const cls = [
+          v >= 0 ? "up" : "down",
+          flash === "up" ? "speed-flash-up" : "",
+          flash === "down" ? "speed-flash-down" : "",
+        ]
+          .filter(Boolean)
+          .join(" ");
+        return <span className={cls}>{formatPct(v)}</span>;
       },
     },
     concepts: {
       title: "概念",
       dataIndex: "concepts",
       ellipsis: true,
-      render: (v: string[]) => v?.slice(0, 3).join(" / ") || "—",
+      render: (v: string[]) =>
+        v?.length
+          ? v.slice(0, 3).join(" / ")
+          : emptyAsDots
+            ? <span className="cell-pending">···</span>
+            : "—",
     },
     industry: {
       title: "行业",
       dataIndex: "industry",
       width: 100,
-      render: (v: string) => v || "—",
+      render: (v: string) =>
+        v || (emptyAsDots ? <span className="cell-pending">···</span> : "—"),
     },
     region: {
       title: "地域",
       dataIndex: "region",
       width: 90,
-      render: (v: string) => v || "—",
+      render: (v: string) =>
+        v || (emptyAsDots ? <span className="cell-pending">···</span> : "—"),
     },
     top10_holder_pct: {
       title: "十大股东占比",
       dataIndex: "top10_holder_pct",
       width: 110,
-      render: (v: number | null) => formatPct(v),
+      render: (v: number | null) => pendingOr(v, formatPct, emptyAsDots),
     },
     top10_major_holder_pct: {
       title: "持股≥5%占比",
       dataIndex: "top10_major_holder_pct",
       width: 110,
-      render: (v: number | null | undefined) => formatPct(v ?? null),
+      render: (v: number | null | undefined) =>
+        pendingOr(v ?? null, formatPct, emptyAsDots),
     },
     zt_success_rate: {
       title: "涨停成功率",
       dataIndex: "zt_success_rate",
       width: 100,
-      render: (v: number | null | undefined) => formatPct(v ?? null),
+      render: (v: number | null | undefined) =>
+        pendingOr(v ?? null, formatPct, emptyAsDots),
     },
     first_seal_rate: {
       title: "首板封板率",
       dataIndex: "first_seal_rate",
       width: 100,
-      render: (v: number | null | undefined) => formatPct(v ?? null),
+      render: (v: number | null | undefined) =>
+        pendingOr(v ?? null, formatPct, emptyAsDots),
     },
     next_red_rate: {
       title: "次日红盘率",
       dataIndex: "next_red_rate",
       width: 100,
-      render: (v: number | null | undefined) => formatPct(v ?? null),
+      render: (v: number | null | undefined) =>
+        pendingOr(v ?? null, formatPct, emptyAsDots),
     },
     year_seal_rate: {
       title: "近一年封板率",
       dataIndex: "year_seal_rate",
       width: 110,
-      render: (v: number | null) => formatPct(v),
+      render: (v: number | null) => pendingOr(v, formatPct, emptyAsDots),
     },
     year_board_rate: {
       title: "近一年连板率",
       dataIndex: "year_board_rate",
       width: 110,
-      render: (v: number | null) => formatPct(v),
+      render: (v: number | null) => pendingOr(v, formatPct, emptyAsDots),
     },
     turnover: {
       title: "换手率",
@@ -258,6 +294,9 @@ export function MonitorTable({
   selectedRowKeys,
   onSelectedRowKeysChange,
   showNameBoardMarks = false,
+  enableSpeedFlash = false,
+  emptyAsDots = false,
+  loadingOverlay = false,
 }: {
   data: StockItem[];
   columns: string[];
@@ -274,10 +313,69 @@ export function MonitorTable({
   onSelectedRowKeysChange?: (keys: string[]) => void;
   /** 名称后展示板数 / 炸（涨速榜） */
   showNameBoardMarks?: boolean;
+  /** 涨速数值升降短暂高亮 */
+  enableSpeedFlash?: boolean;
+  /** 慢字段未到位时用固定占位，减少列宽抖 */
+  emptyAsDots?: boolean;
+  /** 换板等场景：保留旧数据并盖遮罩 */
+  loadingOverlay?: boolean;
 }) {
+  const prevSpeedRef = useRef<Map<string, number>>(new Map());
+  const [speedFlash, setSpeedFlash] = useState<Record<string, "up" | "down">>(
+    {},
+  );
+
+  useEffect(() => {
+    if (!enableSpeedFlash) return;
+    const prev = prevSpeedRef.current;
+    const changed: Record<string, "up" | "down"> = {};
+    for (const r of data) {
+      const sp = Number(r.speed);
+      if (Number.isNaN(sp)) continue;
+      const old = prev.get(r.code);
+      if (old != null && sp !== old) {
+        changed[r.code] = sp > old ? "up" : "down";
+      }
+      prev.set(r.code, sp);
+    }
+    // 清理已离开榜单的 code，避免 Map 无限增长
+    if (prev.size > data.length + 80) {
+      const keep = new Set(data.map((r) => r.code));
+      for (const k of [...prev.keys()]) {
+        if (!keep.has(k)) prev.delete(k);
+      }
+    }
+    if (!Object.keys(changed).length) return;
+    setSpeedFlash((p) => ({ ...p, ...changed }));
+    const timer = window.setTimeout(() => {
+      setSpeedFlash((p) => {
+        const next = { ...p };
+        for (const k of Object.keys(changed)) delete next[k];
+        return next;
+      });
+    }, 450);
+    return () => window.clearTimeout(timer);
+  }, [data, enableSpeedFlash]);
+
   const cols = useMemo(
-    () => buildColumns(columns, onOpenChart, extraActions, showNameBoardMarks),
-    [columns, onOpenChart, extraActions, showNameBoardMarks],
+    () =>
+      buildColumns(
+        columns,
+        onOpenChart,
+        extraActions,
+        showNameBoardMarks,
+        enableSpeedFlash ? speedFlash : undefined,
+        emptyAsDots,
+      ),
+    [
+      columns,
+      onOpenChart,
+      extraActions,
+      showNameBoardMarks,
+      enableSpeedFlash,
+      speedFlash,
+      emptyAsDots,
+    ],
   );
   const scrollX = useMemo(() => {
     const sum = cols.reduce((acc, c) => {
@@ -339,7 +437,11 @@ export function MonitorTable({
   }, [selectedCode]);
 
   return (
-    <div ref={wrapRef} className="monitor-table-wrap">
+    <div
+      ref={wrapRef}
+      className={`monitor-table-wrap${loadingOverlay ? " is-loading-overlay" : ""}`}
+    >
+      {loadingOverlay ? <div className="table-loading-bar" aria-hidden /> : null}
       <Table
         size="small"
         rowKey="code"
@@ -368,6 +470,9 @@ export function MonitorTable({
           onClick: () => onRowClick(record),
         })}
       />
+      {loadingOverlay ? (
+        <div className="table-loading-mask" aria-busy="true" />
+      ) : null}
     </div>
   );
 }
