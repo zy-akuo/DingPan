@@ -44,7 +44,7 @@ export interface StockItem {
   first_seal_rate?: number | null;
   /** 次日红盘率 % */
   next_red_rate?: number | null;
-  /** 涨速 % */
+  /** 5分钟涨速 % */
   speed?: number | null;
   /** 异动原因 */
   reason?: string;
@@ -186,8 +186,8 @@ export const DEFAULT_ALERT_SPEECH_TYPES = [
   "zt_smash",
 ] as const;
 
-/** 涨速榜默认列顺序（与后端 DEFAULT_SPEED_TABLE_COLUMNS 对齐） */
-export const DEFAULT_SPEED_TABLE_COLUMNS = [
+/** 旧默认：涨跌幅在股价之后。仍等于该顺序时迁到涨速右侧。 */
+const LEGACY_SPEED_TABLE_COLUMNS = [
   "name",
   "speed",
   "amount",
@@ -205,21 +205,45 @@ export const DEFAULT_SPEED_TABLE_COLUMNS = [
   "top10_major_holder_pct",
 ] as const;
 
+/** 涨速榜默认列顺序（与后端 DEFAULT_SPEED_TABLE_COLUMNS 对齐） */
+export const DEFAULT_SPEED_TABLE_COLUMNS = [
+  "name",
+  "speed",
+  "change_pct",
+  "amount",
+  "total_mv",
+  "free_float_mv",
+  "price",
+  "concepts",
+  "industry",
+  "region",
+  "zt_success_rate",
+  "first_seal_rate",
+  "next_red_rate",
+  "top10_holder_pct",
+  "top10_major_holder_pct",
+] as const;
+
 export function normalizeSpeedTableColumns(cols?: string[] | null): string[] {
+  const raw = (cols || []).map((k) => String(k || "").trim()).filter(Boolean);
+  if (
+    !raw.length ||
+    (raw.length === LEGACY_SPEED_TABLE_COLUMNS.length &&
+      raw.every((k, i) => k === LEGACY_SPEED_TABLE_COLUMNS[i]))
+  ) {
+    return [...DEFAULT_SPEED_TABLE_COLUMNS];
+  }
   const allowed = new Set<string>(DEFAULT_SPEED_TABLE_COLUMNS);
   const seen = new Set<string>();
   const out: string[] = [];
-  for (const k of cols || []) {
-    const key = String(k || "").trim();
+  for (const key of raw) {
     if (allowed.has(key) && !seen.has(key)) {
       seen.add(key);
       out.push(key);
     }
   }
-  for (const k of DEFAULT_SPEED_TABLE_COLUMNS) {
-    if (!seen.has(k)) out.push(k);
-  }
-  return out;
+  if (!out.includes("name")) out.unshift("name");
+  return out.length ? out : [...DEFAULT_SPEED_TABLE_COLUMNS];
 }
 
 export interface FieldConfig {

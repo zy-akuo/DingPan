@@ -13,7 +13,6 @@ import {
 } from "../lib/boardBucket";
 import { mergeRows, quoteListSignature } from "../lib/stockRows";
 import {
-  addSpeedHidden,
   clearSpeedHidden,
   loadSpeedHidden,
   removeSpeedHidden,
@@ -49,17 +48,12 @@ export function SpeedRankPanel({
   selectedCode,
   pollSec = 1.5,
   showStStocks = true,
-  hideRequest,
-  onHideRequestHandled,
 }: {
   columns: string[];
   onRowClick: (s: StockItem) => void;
   selectedCode?: string | null;
   pollSec?: number;
   showStStocks?: boolean;
-  /** App 抽屉触发的隐藏请求 */
-  hideRequest?: { code: string; name: string; token: number } | null;
-  onHideRequestHandled?: () => void;
 }) {
   const [board, setBoard] = useState<BoardBucket>("main");
   const [rows, setRows] = useState<StockItem[]>([]);
@@ -102,19 +96,6 @@ export function SpeedRankPanel({
     () => new Set(hiddenList.map((e) => e.code)),
     [hiddenList],
   );
-
-  const hideStock = useCallback((code: string, name: string) => {
-    const next = addSpeedHidden(code, name);
-    setHiddenList(next);
-    setSelectedKeys((keys) => keys.filter((k) => k !== code));
-    message.success(`已从涨速榜隐藏 ${name || code}`);
-  }, []);
-
-  useEffect(() => {
-    if (!hideRequest?.code) return;
-    hideStock(hideRequest.code, hideRequest.name);
-    onHideRequestHandled?.();
-  }, [hideRequest, hideStock, onHideRequestHandled]);
 
   const triggerPulse = useCallback(() => {
     setPulse(true);
@@ -414,7 +395,7 @@ export function SpeedRankPanel({
           {failHint ? (
             <span className="speed-fail-hint"> · 刷新失败 · 保留上次</span>
           ) : null}
-          <span className="muted"> · 涨速降序 · 已隐藏涨停/负涨速</span>
+          <span className="muted"> · 5分钟涨速降序 · 已隐藏涨停/负涨速</span>
         </span>
       </div>
       <SpeedFilterBar

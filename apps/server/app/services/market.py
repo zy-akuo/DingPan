@@ -287,6 +287,8 @@ class MarketService:
         self._y_dt_count = 0
         # _y_zt 对应的「今日」交易日锚点；换日后才允许整表替换昨日池
         self._y_anchor_trade: str = ""
+        # _y_zt 本身的交易日（昨池日期）；用于拒绝错日昨池参与建梯
+        self._y_pool_date: str = ""
         self._listeners: list[asyncio.Queue] = []
         self._fund_broadcast_pending = False
         self._fail_quote_cache: dict[str, dict[str, Any]] = {}
@@ -606,6 +608,23 @@ class MarketService:
             return today_yyyymmdd(), [], [], []
         return last[0], last[1], last[2], last[3]
 
+    def _yesterday_pool_ready(self, trade_date: str) -> bool:
+        """昨池已锚定到当前交易日，且昨池日期严格早于今日。"""
+        return bool(
+            trade_date
+            and self._y_anchor_trade == trade_date
+            and self._y_pool_date
+            and self._y_pool_date < trade_date
+            and self._y_zt
+        )
+
+    def _clear_yesterday_pools(self) -> None:
+        self._y_zt = []
+        self._y_zb_count = 0
+        self._y_dt_count = 0
+        self._y_anchor_trade = ""
+        self._y_pool_date = ""
+
     async def _load_prev_day_pools(
         self,
         trade_date: str,
@@ -615,8 +634,14 @@ class MarketService:
         """相对 trade_date 的上一交易日涨停池（供连板天梯晋级/炸板归桶）。
 
         东财偶发空包/截断时禁止清空或用瘦包覆盖，否则天梯「仅败」档位（如 3进4）会整行闪没。
+        换日时必须丢掉上一会话的昨池：否则会用「前天」板数把败股整体少计一档
+        （如 10/30 误用 10/28 池 → 襄阳轴承幽灵 5进6、光洋股份掉到 3进4）。
         """
         from datetime import timedelta
+
+        # 换日：陈旧昨池一律清空，宁可暂时无「败」也不能错档
+        if self._y_anchor_trade and self._y_anchor_trade != trade_date:
+            self._clear_yesterday_pools()
 
         trade_fp = _pool_fingerprint(trade_zt, trade_zb)
         try:
@@ -648,16 +673,14 @@ class MarketService:
                 self._y_zb_count = len(zb)
                 self._y_dt_count = len(dt)
                 self._y_anchor_trade = trade_date
+                self._y_pool_date = ds
                 return
             d = d - timedelta(days=1)
 
-        # 全失败：保留旧值，切勿清成 []（否则晋级失败档整批消失）
-        if self._y_zt:
+        # 全失败：仅在已正确锚定到本交易日时保留；否则保持空，避免错日昨池
+        if self._yesterday_pool_ready(trade_date):
             return
-        self._y_zt = []
-        self._y_zb_count = 0
-        self._y_dt_count = 0
-        self._y_anchor_trade = ""
+        self._clear_yesterday_pools()
 
     async def warmup_yesterday(self) -> None:
         """启动时预热：解析最新交易日，并加载其上一交易日。"""
@@ -1323,28 +1346,37 @@ class MarketService:
 
         回补「败」时：
         - 已出现在新天梯任意档的代码不再回补（避免一字多档，如良品铺子同时在 3进4 与 1进2）
-        - 仅回补到与当前昨日涨停池 board_count 一致的档位（避免陈旧错误板数占坑）
+        - 必须仍在当前昨日涨停池，且 board_count 与档位一致（yl is None 一律丢弃，防旧短板残条）
         """
         if not prev:
             return new
         if self.snapshot.trade_date and self.snapshot.trade_date != trade_date:
             return new
+        # 昨日池尚未锚定到本交易日时，禁止整表/残条回补，避免混入上一交易日短板
+        if not self._yesterday_pool_ready(trade_date):
+            return new
 
         prev_n = self._ladder_stock_count(prev)
         new_n = self._ladder_stock_count(new)
-        if prev_n >= 5 and new_n < max(3, int(prev_n * 0.6)):
+        # 仅当新天梯接近空（疑似拉取失败）时整表回退。
+        # 禁止用 0.6 阈值：错昨池胖梯纠正后变瘦会被误判为瘦包而盖回错误数据。
+        if prev_n >= 5 and new_n < max(2, min(6, int(prev_n * 0.2))):
             return list(prev)
 
         new_map = {g.key: g for g in new}
         # 全表已有代码：防止跨档重复
         present = {s.code for g in new for s in g.stocks}
-        # 昨日板数口径（有则强制档位一致）
+        # 昨日板数口径：不在池内则禁止回补
         y_level = {
             str(r.get("code") or "").zfill(6): max(1, int(r.get("board_count") or 1))
             for r in (self._y_zt or [])
             if str(r.get("code") or "").zfill(6).isdigit()
         }
         changed = False
+
+        def can_backfill_fail(code: str, expect_level: int) -> bool:
+            yl = y_level.get(code)
+            return yl is not None and yl == expect_level
 
         for g in prev:
             if g.key == "first" or not g.stocks:
@@ -1355,15 +1387,14 @@ class MarketService:
                 continue
             cur = new_map.get(g.key)
             if cur is None:
-                # 整档消失：只保留仍属于该档的「败」，且不能与其他档冲突
+                # 整档消失：只保留仍属于当前昨日池且档位匹配的「败」
                 kept = []
                 for s in g.stocks:
                     if s.status != StockStatus.FAIL:
                         continue
                     if s.code in present:
                         continue
-                    yl = y_level.get(s.code)
-                    if yl is not None and yl != expect_level:
+                    if not can_backfill_fail(s.code, expect_level):
                         continue
                     kept.append(s)
                     present.add(s.code)
@@ -1382,15 +1413,14 @@ class MarketService:
                 changed = True
                 continue
             have = {s.code for s in cur.stocks}
-            # 只回补「败」：成/炸应由今日池驱动；且不得跨档、不得与昨日板数矛盾
+            # 只回补「败」：成/炸应由今日池驱动；必须在昨日池且档位一致
             extra = []
             for s in g.stocks:
                 if s.code in have or s.code in present:
                     continue
                 if s.status != StockStatus.FAIL:
                     continue
-                yl = y_level.get(s.code)
-                if yl is not None and yl != expect_level:
+                if not can_backfill_fail(s.code, expect_level):
                     continue
                 extra.append(s)
                 present.add(s.code)
@@ -1871,13 +1901,14 @@ class MarketService:
                 reverse=True,
             )
 
-            y_zt_count = len(self._y_zt)
-            y_lb = sum(1 for r in self._y_zt if int(r.get("board_count") or 1) >= 2)
             denom = len(zt) + len(zb)
             seal_today = round(len(zt) / denom * 100, 1) if denom else 0.0
-            y_denom = y_zt_count + self._y_zb_count
+            # 昨池未锚定到本交易日时禁用（空列表），避免用「前天」板数系统性少计一档
+            y_for_ladder = self._y_zt if self._yesterday_pool_ready(date) else []
+            y_zt_count = len(y_for_ladder)
+            y_lb = sum(1 for r in y_for_ladder if int(r.get("board_count") or 1) >= 2)
+            y_denom = y_zt_count + (self._y_zb_count if y_for_ladder else 0)
             seal_y = round(y_zt_count / y_denom * 100, 1) if y_denom else 0.0
-
             summary = MarketSummary(
                 zt_today=len(zt),
                 zt_yesterday=y_zt_count,
@@ -1886,14 +1917,14 @@ class MarketService:
                 seal_rate_today=seal_today,
                 seal_rate_yesterday=seal_y,
                 zb_today=len(zb),
-                zb_yesterday=self._y_zb_count,
+                zb_yesterday=self._y_zb_count if y_for_ladder else 0,
                 dt_today=len(dt),
-                dt_yesterday=self._y_dt_count,
+                dt_yesterday=self._y_dt_count if y_for_ladder else 0,
             )
 
             speech = self._diff_speech(zt, zb)
             prev_ladder = list(self.snapshot.ladder or [])
-            ladder = self._build_ladder(zt, zb, self._y_zt)
+            ladder = self._build_ladder(zt, zb, y_for_ladder)
             try:
                 ladder = await asyncio.wait_for(self._enrich_ladder_fails(ladder), timeout=12)
             except Exception:

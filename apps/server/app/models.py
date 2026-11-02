@@ -52,14 +52,15 @@ class StockItem(BaseModel):
     zt_success_rate: float | None = None
     first_seal_rate: float | None = None
     next_red_rate: float | None = None
-    speed: float | None = None  # 涨速 %
+    speed: float | None = None  # 5分钟涨速 %
     reason: str = ""  # 异动原因（涨停概念/题材）
     # 避雷啦 / 风险警示：st=其他风险警示, delist=退市风险(*ST), warn=潜在风险
     risk_tags: list[str] = Field(default_factory=list)
     risk_hint: str = ""
 
 
-DEFAULT_SPEED_TABLE_COLUMNS: list[str] = [
+# 旧默认：涨跌幅排在股价之后。仍等于该顺序时迁到涨速右侧。
+_LEGACY_SPEED_TABLE_COLUMNS: list[str] = [
     "name",
     "speed",
     "amount",
@@ -67,6 +68,24 @@ DEFAULT_SPEED_TABLE_COLUMNS: list[str] = [
     "free_float_mv",
     "price",
     "change_pct",
+    "concepts",
+    "industry",
+    "region",
+    "zt_success_rate",
+    "first_seal_rate",
+    "next_red_rate",
+    "top10_holder_pct",
+    "top10_major_holder_pct",
+]
+
+DEFAULT_SPEED_TABLE_COLUMNS: list[str] = [
+    "name",
+    "speed",
+    "change_pct",
+    "amount",
+    "total_mv",
+    "free_float_mv",
+    "price",
     "concepts",
     "industry",
     "region",
@@ -243,19 +262,20 @@ AVAILABLE_FIELDS: dict[str, str] = {
 
 
 def normalize_speed_table_columns(cols: list[str] | None) -> list[str]:
-    """校验涨速榜列：固定 15 列全集，仅允许调整顺序。"""
+    """校验涨速榜列：允许删列和调序，名称列始终保留。空配置回退默认全集。"""
+    raw = [str(k or "").strip() for k in (cols or []) if str(k or "").strip()]
+    if not raw or raw == _LEGACY_SPEED_TABLE_COLUMNS:
+        return list(DEFAULT_SPEED_TABLE_COLUMNS)
     allowed = set(DEFAULT_SPEED_TABLE_COLUMNS)
     seen: set[str] = set()
     out: list[str] = []
-    for k in cols or []:
-        key = str(k or "").strip()
+    for key in raw:
         if key in allowed and key not in seen:
             seen.add(key)
             out.append(key)
-    for k in DEFAULT_SPEED_TABLE_COLUMNS:
-        if k not in seen:
-            out.append(k)
-    return out
+    if "name" not in seen:
+        out.insert(0, "name")
+    return out or list(DEFAULT_SPEED_TABLE_COLUMNS)
 
 
 class UserConfig(BaseModel):

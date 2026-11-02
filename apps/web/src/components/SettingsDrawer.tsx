@@ -1,9 +1,15 @@
-import { ArrowDownOutlined, ArrowUpOutlined } from "@ant-design/icons";
+import {
+  ArrowDownOutlined,
+  ArrowUpOutlined,
+  DeleteOutlined,
+  PlusOutlined,
+} from "@ant-design/icons";
 import { Button, Checkbox, Drawer, InputNumber, Space, Switch } from "antd";
 import { useEffect, useMemo, useState } from "react";
 import type { FieldConfig } from "../types";
 import {
   DEFAULT_ALERT_SPEECH_TYPES,
+  DEFAULT_SPEED_TABLE_COLUMNS,
   normalizeSpeedTableColumns,
 } from "../types";
 
@@ -54,6 +60,23 @@ export function SettingsDrawer({
     next[j] = tmp;
     setDraft({ ...draft, speed_table_columns: next });
   };
+
+  const removeSpeedCol = (key: string) => {
+    if (key === "name") return;
+    setDraft({
+      ...draft,
+      speed_table_columns: speedCols.filter((k) => k !== key),
+    });
+  };
+
+  const addSpeedCol = (key: string) => {
+    if (speedCols.includes(key)) return;
+    setDraft({ ...draft, speed_table_columns: [...speedCols, key] });
+  };
+
+  const omittedSpeedCols = DEFAULT_SPEED_TABLE_COLUMNS.filter(
+    (k) => !speedCols.includes(k),
+  );
 
   return (
     <Drawer
@@ -342,7 +365,7 @@ export function SettingsDrawer({
       <div className="settings-block">
         <h4>涨速榜列（顺序可调）</h4>
         <div style={{ color: "var(--muted)", fontSize: 12, marginBottom: 8, lineHeight: 1.5 }}>
-          固定展示全部 15 列，可用上下箭头调整顺序；与监控表格列配置独立。
+          可用上下箭头调整顺序，也可删除不需要的展示列。名称列保留。与监控表格列配置独立。
         </div>
         <div className="speed-col-order">
           {speedCols.map((key, i) => (
@@ -363,10 +386,37 @@ export function SettingsDrawer({
                   disabled={i === speedCols.length - 1}
                   onClick={() => moveSpeedCol(i, 1)}
                 />
+                <Button
+                  size="small"
+                  danger
+                  icon={<DeleteOutlined />}
+                  disabled={key === "name"}
+                  title={key === "name" ? "名称列保留" : "删除该展示列"}
+                  onClick={() => removeSpeedCol(key)}
+                />
               </Space>
             </div>
           ))}
         </div>
+        {omittedSpeedCols.length ? (
+          <div className="speed-col-omitted">
+            <div className="speed-col-omitted-title">未展示</div>
+            {omittedSpeedCols.map((key) => (
+              <div key={key} className="speed-col-order-row">
+                <span className="speed-col-order-label muted">
+                  {available[key] || key}
+                </span>
+                <Button
+                  size="small"
+                  icon={<PlusOutlined />}
+                  onClick={() => addSpeedCol(key)}
+                >
+                  添加
+                </Button>
+              </div>
+            ))}
+          </div>
+        ) : null}
       </div>
 
       <div className="settings-block">

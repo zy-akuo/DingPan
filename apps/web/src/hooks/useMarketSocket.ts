@@ -35,7 +35,11 @@ function ladderStockCount(ladder: LadderGroup[] | undefined): number {
   return (ladder || []).reduce((n, g) => n + (g.stocks?.length || 0), 0);
 }
 
-/** 服务端偶发瘦包时保留本地天梯，避免「3进4」等档位闪没。 */
+/** 服务端偶发瘦包时保留本地天梯，避免「3进4」等档位闪没。
+
+ * 不对齐整档粘贴：消失的档位不再复活；仅向 next 已有同 key 档补「败」，
+ * 且该代码尚未出现在 next 任意档（防幽灵短板/跨档重复）。
+ */
 function keepLadder(
   prev: LadderGroup[] | undefined,
   next: LadderGroup[] | undefined,
@@ -48,16 +52,29 @@ function keepLadder(
 
   const pn = ladderStockCount(p);
   const nn = ladderStockCount(n);
-  if (pn >= 5 && nn < Math.max(3, Math.floor(pn * 0.6))) return p;
+  // 仅接近空时整表保留；禁止 0.6 阈值把「纠偏后的正确瘦梯」盖回错误胖梯
+  if (pn >= 5 && nn < Math.max(2, Math.min(6, Math.floor(pn * 0.2)))) return p;
 
-  const nextMap = new Map(n.map((g) => [g.key, g]));
+  const nextMap = new Map(n.map((g) => [g.key, { ...g, stocks: [...(g.stocks || [])] }]));
+  const present = new Set<string>();
+  for (const g of nextMap.values()) {
+    for (const s of g.stocks || []) present.add(s.code);
+  }
+
   let changed = false;
   for (const g of p) {
     if (g.key === "first" || !g.stocks?.length) continue;
-    if (!nextMap.has(g.key)) {
-      nextMap.set(g.key, g);
-      changed = true;
-    }
+    const cur = nextMap.get(g.key);
+    // 不复活已消失档位（避免上一交易日/瘦包幽灵整档贴回）
+    if (!cur) continue;
+    const extra = (g.stocks || []).filter(
+      (s) => s.status === "败" && !present.has(s.code),
+    );
+    if (!extra.length) continue;
+    cur.stocks = [...cur.stocks, ...extra];
+    for (const s of extra) present.add(s.code);
+    nextMap.set(g.key, cur);
+    changed = true;
   }
   if (!changed) return n;
 

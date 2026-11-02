@@ -162,7 +162,9 @@ function buildColumns(
       ),
     },
     speed: {
-      title: "涨速",
+      title: (
+        <span title="近 5 分钟涨跌幅，不是当日涨跌幅">涨速</span>
+      ),
       dataIndex: "speed",
       width: 80,
       render: (v: number | null | undefined, r: StockItem) => {
