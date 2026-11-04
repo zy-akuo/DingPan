@@ -5,6 +5,8 @@ export interface MonitorFilter {
   keyword: string;
   sealTimeFrom: string;
   sealTimeTo: string;
+  priceMin: number | null;
+  priceMax: number | null;
   amountMinYi: number | null;
   amountMaxYi: number | null;
   freeFloatMinYi: number | null;
@@ -18,6 +20,8 @@ export const EMPTY_FILTER: MonitorFilter = {
   keyword: "",
   sealTimeFrom: "",
   sealTimeTo: "",
+  priceMin: null,
+  priceMax: null,
   amountMinYi: null,
   amountMaxYi: null,
   freeFloatMinYi: null,
@@ -47,6 +51,19 @@ function inYiRange(value: number | null | undefined, minYi: number | null, maxYi
   return true;
 }
 
+function inPriceRange(
+  value: number | null | undefined,
+  min: number | null,
+  max: number | null,
+): boolean {
+  if (min == null && max == null) return true;
+  if (value == null || Number.isNaN(Number(value))) return false;
+  const price = Number(value);
+  if (min != null && price < min) return false;
+  if (max != null && price > max) return false;
+  return true;
+}
+
 export function applyMonitorFilter(list: StockItem[], f: MonitorFilter): StockItem[] {
   const fromSec = timeToSec(f.sealTimeFrom);
   const toSec = timeToSec(f.sealTimeTo);
@@ -65,6 +82,7 @@ export function applyMonitorFilter(list: StockItem[], f: MonitorFilter): StockIt
       if (fromSec != null && t < fromSec) return false;
       if (toSec != null && t > toSec) return false;
     }
+    if (!inPriceRange(s.price, f.priceMin, f.priceMax)) return false;
     if (!inYiRange(s.amount, f.amountMinYi, f.amountMaxYi)) return false;
     if (!inYiRange(s.free_float_mv, f.freeFloatMinYi, f.freeFloatMaxYi)) return false;
     if (!inYiRange(s.float_mv, f.floatMinYi, f.floatMaxYi)) return false;
@@ -122,6 +140,44 @@ function RangeYi({
   );
 }
 
+function RangePrice({
+  min,
+  max,
+  onMin,
+  onMax,
+}: {
+  min: number | null;
+  max: number | null;
+  onMin: (v: number | null) => void;
+  onMax: (v: number | null) => void;
+}) {
+  return (
+    <Space size={4} className="filter-item">
+      <span className="filter-label">股价</span>
+      <InputNumber
+        size="small"
+        min={0}
+        step={1}
+        placeholder="最低"
+        value={min}
+        onChange={(v) => onMin(typeof v === "number" ? v : null)}
+        style={{ width: 72 }}
+      />
+      <span className="filter-sep">~</span>
+      <InputNumber
+        size="small"
+        min={0}
+        step={1}
+        placeholder="最高"
+        value={max}
+        onChange={(v) => onMax(typeof v === "number" ? v : null)}
+        style={{ width: 72 }}
+      />
+      <span className="filter-unit">元</span>
+    </Space>
+  );
+}
+
 export function MonitorFilterBar({
   value,
   onChange,
@@ -172,6 +228,12 @@ export function MonitorFilterBar({
         />
       </Space>
 
+      <RangePrice
+        min={value.priceMin}
+        max={value.priceMax}
+        onMin={(v) => patch({ priceMin: v })}
+        onMax={(v) => patch({ priceMax: v })}
+      />
       <RangeYi
         label="成交额"
         min={value.amountMinYi}
