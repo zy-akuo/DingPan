@@ -11,6 +11,8 @@ import {
   Empty,
   Input,
   Segmented,
+  Select,
+  Space,
   Spin,
   Tag,
 } from "antd";
@@ -36,6 +38,7 @@ import type {
   StockZtHistoryResult,
 } from "../types";
 import { formatMoney, formatPct, tradeDateLabel } from "../types";
+import { collectRegions } from "./MonitorFilterBar";
 import { MonitorTable } from "./MonitorTable";
 import { StockChartModal } from "./StockChartModal";
 
@@ -143,6 +146,7 @@ function StockChip({
   chipRef?: (el: HTMLDivElement | null) => void;
 }) {
   const concept = stock.reason || stock.concepts?.[0] || stock.industry || "";
+  const region = (stock.region || "").trim();
   const cls = [
     "kpl-chip",
     hit ? "kpl-chip-hit" : "",
@@ -163,7 +167,7 @@ function StockChip({
           onClick(stock);
         }
       }}
-      title={`${stock.name} ${stock.code}`}
+      title={`${stock.name} ${stock.code}${concept ? ` · ${concept}` : ""}${region ? ` · ${region}` : ""}`}
     >
       <span className="kpl-chip-time">{sealTimeShort(stock.first_seal_time)}</span>
       <span className="kpl-chip-name">{stock.name}</span>
@@ -171,6 +175,7 @@ function StockChip({
       {stock.zt_stats && /一字/.test(stock.zt_stats) ? (
         <span className="kpl-chip-tag">一字</span>
       ) : null}
+      {region ? <span className="kpl-chip-region">{region}</span> : null}
       {onOpenChart ? (
         <button
           type="button"
@@ -206,6 +211,7 @@ export function HistoryBackPanel({
   const [mode, setMode] = useState<ViewMode>("ladder");
   const [nameKw, setNameKw] = useState("");
   const [kw, setKw] = useState("");
+  const [region, setRegion] = useState("");
   const [stockKw, setStockKw] = useState("");
   const [stockOptions, setStockOptions] = useState<
     { value: string; label: string; item: StockSuggest }[]
@@ -315,6 +321,15 @@ export function HistoryBackPanel({
     [kw],
   );
 
+  const filterByRegion = useCallback(
+    (s: StockItem) => {
+      const r = region.trim();
+      if (!r) return true;
+      return (s.region || "").includes(r);
+    },
+    [region],
+  );
+
   const viewData = useMemo(() => {
     if (!data || showStStocks) return data;
     const mapGroups = (groups: HistoryGroup[]) =>
@@ -351,23 +366,32 @@ export function HistoryBackPanel({
     return set;
   }, [viewData, nameKw]);
 
+  const regions = useMemo(
+    () => collectRegions(viewData?.items || []),
+    [viewData],
+  );
+
   const conceptGroups = useMemo(() => {
     const raw = viewData?.concept_groups || [];
-    if (!kw.trim()) return raw;
+    if (!kw.trim() && !region.trim()) return raw;
     return raw
       .map((g) => {
-        const stocks = (g.stocks || []).filter(filterByReason);
+        const stocks = (g.stocks || [])
+          .filter(filterByReason)
+          .filter(filterByRegion);
         if (!stocks.length) return null;
         return { ...g, stocks, count: stocks.length };
       })
       .filter(Boolean) as HistoryGroup[];
-  }, [viewData, kw, filterByReason]);
+  }, [viewData, kw, region, filterByReason, filterByRegion]);
 
   const boardGroups = useMemo(() => {
     const raw = viewData?.board_groups || [];
     return raw
       .map((g) => {
-        let stocks = (g.stocks || []).filter(filterByReason);
+        let stocks = (g.stocks || [])
+          .filter(filterByReason)
+          .filter(filterByRegion);
         if (activeConcept) {
           stocks = stocks.filter((s) => {
             const primary = (s.reason || s.industry || "").trim();
@@ -375,11 +399,13 @@ export function HistoryBackPanel({
             return (s.concepts || []).some((c) => c === activeConcept);
           });
         }
-        if (!stocks.length && (kw.trim() || activeConcept)) return null;
+        if (!stocks.length && (kw.trim() || region.trim() || activeConcept)) {
+          return null;
+        }
         return { ...g, stocks, count: stocks.length };
       })
       .filter(Boolean) as HistoryGroup[];
-  }, [viewData, kw, filterByReason, activeConcept]);
+  }, [viewData, kw, region, filterByReason, filterByRegion, activeConcept]);
 
   const dateLabel = tradeDateLabel(date);
   const canNext = dateValue.isBefore(dayjs(), "day");
@@ -703,6 +729,19 @@ export function HistoryBackPanel({
             value={kw}
             onChange={(e) => setKw(e.target.value)}
           />
+          <Space size={4} className="filter-item">
+            <span className="filter-label">地域</span>
+            <Select
+              allowClear
+              showSearch
+              placeholder="全部"
+              value={region || undefined}
+              onChange={(v) => setRegion(v || "")}
+              options={regions.map((r) => ({ label: r, value: r }))}
+              style={{ width: 120 }}
+              optionFilterProp="label"
+            />
+          </Space>
         </div>
       </div>
 

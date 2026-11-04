@@ -418,6 +418,71 @@ class MarketService:
         data["board_groups"] = _filter_groups(list(data.get("board_groups") or []))
         return data
 
+    async def _hydrate_history_regions(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """从 fundamentals 补齐历史涨停个股地域（开盘啦源无此字段）。"""
+        if not payload:
+            return payload
+        items = list(payload.get("items") or [])
+        codes: list[str] = []
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            code = str(it.get("code") or "").zfill(6)
+            if code.isdigit():
+                codes.append(code)
+        if not codes:
+            return payload
+        try:
+            fund_map = await get_fundamentals_batch(codes)
+        except Exception:
+            fund_map = {}
+        region_by_code: dict[str, str] = {}
+        for code, fund in (fund_map or {}).items():
+            region = str((fund or {}).get("region") or "").strip()
+            if region:
+                region_by_code[str(code).zfill(6)] = region
+        if not region_by_code:
+            return payload
+
+        data = dict(payload)
+        new_items: list[Any] = []
+        for it in items:
+            if not isinstance(it, dict):
+                new_items.append(it)
+                continue
+            code = str(it.get("code") or "").zfill(6)
+            region = region_by_code.get(code)
+            if region:
+                new_items.append({**it, "region": region})
+            else:
+                new_items.append(it)
+        data["items"] = new_items
+
+        def _patch_groups(groups: list[Any]) -> list[dict[str, Any]]:
+            out: list[dict[str, Any]] = []
+            for g in groups or []:
+                if not isinstance(g, dict):
+                    continue
+                ng = dict(g)
+                stocks: list[Any] = []
+                for s in g.get("stocks") or []:
+                    if not isinstance(s, dict):
+                        stocks.append(s)
+                        continue
+                    code = str(s.get("code") or "").zfill(6)
+                    region = region_by_code.get(code)
+                    if region:
+                        stocks.append({**s, "region": region})
+                    else:
+                        stocks.append(s)
+                ng["stocks"] = stocks
+                out.append(ng)
+            return out
+
+        data["board_groups"] = _patch_groups(list(data.get("board_groups") or []))
+        data["concept_groups"] = _patch_groups(list(data.get("concept_groups") or []))
+        return data
+
     def filter_st_auction_board(self, result: dict[str, Any]) -> dict[str, Any]:
         if self._show_st_enabled() or not result:
             return result
@@ -2783,7 +2848,8 @@ class MarketService:
             and int(cached.get("count") or 0) > 0
             and cached.get("board_groups") is not None
         ):
-            return self.filter_st_history_payload(cached)
+            hydrated = await self._hydrate_history_regions(cached)
+            return self.filter_st_history_payload(hydrated)
 
         kpl = KaipanlaClient()
         try:
@@ -2860,8 +2926,20 @@ class MarketService:
                 status=StockStatus.SUCCESS,
                 board_tag=_board_tag(board, open_times),
                 reason=str(row.get("reason") or ""),
+                region=str(row.get("region") or ""),
             )
             items.append(s)
+
+        if items:
+            try:
+                fund_map = await get_fundamentals_batch([s.code for s in items])
+            except Exception:
+                fund_map = {}
+            for s in items:
+                fund = fund_map.get(s.code) or {}
+                region = str(fund.get("region") or "").strip()
+                if region:
+                    s.region = region
 
         stock_map = {s.code: s for s in items}
 
@@ -2944,7 +3022,8 @@ class MarketService:
                 )
             except Exception:
                 pass
-        return self.filter_st_history_payload(payload)
+        hydrated = await self._hydrate_history_regions(payload)
+        return self.filter_st_history_payload(hydrated)
 
     @staticmethod
     def _board_label(board: int) -> str:
