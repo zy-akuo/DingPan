@@ -1,7 +1,8 @@
-import { Drawer, Spin, Tag } from "antd";
+import { Button, Drawer, Spin, Tag, message } from "antd";
 import * as echarts from "echarts";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { cacheGet, cacheSet } from "../lib/localCache";
+import { loadAlertlist, saveAlertlist } from "../lib/watchlist";
 import type { ConceptTheme, StockItem, TopHolder } from "../types";
 import { formatMoney, formatPct } from "../types";
 
@@ -571,15 +572,52 @@ export function StockDetailDrawer({
   const [radar, setRadar] = useState<RadarData | null>(null);
   const [radarLoading, setRadarLoading] = useState(false);
   const [geneLookback, setGeneLookback] = useState<GeneLookback>("1y");
+  const [addingAlert, setAddingAlert] = useState(false);
+  const [inAlertlist, setInAlertlist] = useState(false);
 
   useEffect(() => {
     if (!open) {
       setRadar(null);
       setGeneLookback("1y");
+      setInAlertlist(false);
       return;
     }
     setGeneLookback("1y");
   }, [open, stock?.code]);
+
+  useEffect(() => {
+    if (!open || !stock?.code) {
+      setInAlertlist(false);
+      return;
+    }
+    let cancelled = false;
+    void loadAlertlist().then((data) => {
+      if (!cancelled) setInAlertlist(data.codes.includes(stock.code));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, stock?.code]);
+
+  const addToAlert = useCallback(async () => {
+    if (!stock?.code || addingAlert) return;
+    setAddingAlert(true);
+    try {
+      const cur = await loadAlertlist();
+      if (cur.codes.includes(stock.code)) {
+        message.info("已在异动播报中");
+        setInAlertlist(true);
+        return;
+      }
+      await saveAlertlist([...cur.codes, stock.code], cur.pinned);
+      setInAlertlist(true);
+      message.success(`已添加 ${stock.name || stock.code} 到异动播报`);
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : "添加失败");
+    } finally {
+      setAddingAlert(false);
+    }
+  }, [stock, addingAlert]);
 
   useEffect(() => {
     if (!open || !stock?.code) {
@@ -643,6 +681,21 @@ export function StockDetailDrawer({
       open={open}
       onClose={onClose}
       width={460}
+      footer={
+        stock ? (
+          <div className="drawer-footer-actions">
+            <Button
+              type="primary"
+              block
+              loading={addingAlert}
+              disabled={inAlertlist}
+              onClick={() => void addToAlert()}
+            >
+              {inAlertlist ? "已在异动播报" : "加入异动播报"}
+            </Button>
+          </div>
+        ) : null
+      }
     >
       {(loading || radarLoading) && (
         <div className="muted" style={{ marginBottom: 12 }}>

@@ -352,6 +352,19 @@ export default function App() {
           colorText: isDark ? "#e6edf3" : "#2a3038",
           colorBgLayout: isDark ? "#0b0f14" : "#e4e7eb",
         },
+        components: {
+          // 对齐异动播报事件流水密度，一屏展示更多行
+          Table: {
+            cellPaddingBlock: 4,
+            cellPaddingBlockMD: 3,
+            cellPaddingBlockSM: 2,
+            cellPaddingInline: 8,
+            cellPaddingInlineMD: 8,
+            cellPaddingInlineSM: 8,
+            cellFontSizeSM: 13,
+            headerBorderRadius: 0,
+          },
+        },
       }}
     >
       <div className={`app theme-${themeMode}`}>

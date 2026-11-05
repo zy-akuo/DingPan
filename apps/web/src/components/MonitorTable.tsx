@@ -96,7 +96,7 @@ function buildColumns(
           <div>
             <div>{r.board_count <= 1 ? "首板" : `${r.board_count}连板`}</div>
             {r.board_tag ? (
-              <Tag color={r.open_times > 0 ? "orange" : "red"} style={{ marginTop: 2 }}>
+              <Tag color={r.open_times > 0 ? "orange" : "red"} style={{ marginTop: 0 }}>
                 {r.open_times > 0 ? "回封" : "硬板"}
               </Tag>
             ) : null}
