@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -11,7 +12,9 @@ def _default_data_dir() -> Path:
     # Windows: %APPDATA%\DingPan
     if sys.platform == "darwin":
         return Path.home() / "Library" / "Application Support" / "DingPan"
-    return Path.home() / "AppData" / "Roaming" / "DingPan"
+    if sys.platform == "win32":
+        return Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming") / "DingPan"
+    return Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "DingPan"
 
 
 class Settings(BaseSettings):

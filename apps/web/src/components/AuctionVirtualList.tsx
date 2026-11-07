@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type CSSProperties,
@@ -18,6 +19,7 @@ export function AuctionVirtualList<T>({
   getKey,
   renderRow,
   className,
+  fillViewport = false,
 }: {
   items: T[];
   rowHeight: number;
@@ -26,16 +28,41 @@ export function AuctionVirtualList<T>({
   getKey: (item: T, index: number) => string;
   renderRow: (item: T, index: number) => ReactNode;
   className?: string;
+  /** 按列表实际位置使用窗口剩余高度。 */
+  fillViewport?: boolean;
 }) {
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewport, setViewport] = useState(maxHeight);
 
+  const [availableHeight, setAvailableHeight] = useState(maxHeight);
+  const listHeight = fillViewport
+    ? Math.min(items.length * rowHeight, availableHeight)
+    : maxHeight;
+
+  useLayoutEffect(() => {
+    if (!fillViewport) return;
+    const el = scrollerRef.current;
+    if (!el) return;
+    const measure = () => {
+      const top = el.getBoundingClientRect().top;
+      setAvailableHeight(Math.max(rowHeight, window.innerHeight - Math.max(0, top) - 16));
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    const observer = new ResizeObserver(measure);
+    if (el.parentElement) observer.observe(el.parentElement);
+    return () => {
+      window.removeEventListener("resize", measure);
+      observer.disconnect();
+    };
+  }, [fillViewport, items.length, rowHeight]);
+
   useEffect(() => {
     const el = scrollerRef.current;
     if (!el) return;
     const measure = () => {
-      const h = el.clientHeight || maxHeight;
+      const h = el.clientHeight || listHeight;
       setViewport(h);
     };
     measure();
@@ -45,7 +72,7 @@ export function AuctionVirtualList<T>({
         : null;
     ro?.observe(el);
     return () => ro?.disconnect();
-  }, [maxHeight]);
+  }, [listHeight]);
 
   const onScroll = useCallback(() => {
     const el = scrollerRef.current;
@@ -62,14 +89,15 @@ export function AuctionVirtualList<T>({
   const slice = items.slice(start, end);
 
   // 条数很少时直接全量渲染，避免虚拟滚动额外开销
-  if (total <= Math.ceil(maxHeight / rh) + 2) {
+  if (total <= Math.ceil(listHeight / rh) + 2) {
     return (
       <div
+        ref={scrollerRef}
         className={className}
         style={
           {
-            height: maxHeight,
-            maxHeight,
+            height: listHeight,
+            maxHeight: listHeight,
             overflowY: "auto",
           } as CSSProperties
         }
@@ -89,8 +117,8 @@ export function AuctionVirtualList<T>({
       className={className}
       onScroll={onScroll}
       style={{
-        height: maxHeight,
-        maxHeight,
+        height: listHeight,
+        maxHeight: listHeight,
         overflowY: "auto",
         position: "relative",
       }}

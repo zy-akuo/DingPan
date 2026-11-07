@@ -1,5 +1,5 @@
 import { LeftOutlined, RightOutlined } from "@ant-design/icons";
-import { Modal, Spin } from "antd";
+import { Button, Modal, Spin } from "antd";
 import * as echarts from "echarts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { calcCyq, type CyqResult } from "../lib/cyqCalculator";
@@ -257,7 +257,7 @@ function priceTone(v: number, base: number): string {
   return "inherit";
 }
 
-function buildTrendOption(points: TrendPoint[], preClose: number, dark: boolean) {
+export function buildTrendOption(points: TrendPoint[], preClose: number, dark: boolean, indexMode = false) {
   const pal = chartPalette(dark);
   const { times, prices, avgs, vols, filled } = alignTrendToAxis(points);
   const pre =
@@ -336,8 +336,8 @@ function buildTrendOption(points: TrendPoint[], preClose: number, dark: boolean)
         const chgColor = chg >= 0 ? UP : DOWN;
         const rows = [
           `<div style="font-weight:700;margin-bottom:4px">${p.time}</div>`,
-          tipRow("价格", p.price.toFixed(2), chgColor),
-          tipRow("均价", p.avg.toFixed(2), AVG_LINE),
+          tipRow(indexMode ? "点位" : "价格", p.price.toFixed(2), chgColor),
+          ...(indexMode ? [] : [tipRow("均价", p.avg.toFixed(2), AVG_LINE)]),
           tipRow(
             "涨跌幅",
             `${chg >= 0 ? "+" : ""}${chg.toFixed(2)}%`,
@@ -480,7 +480,7 @@ function buildTrendOption(points: TrendPoint[], preClose: number, dark: boolean)
       {
         name: "均价",
         type: "line",
-        data: avgs,
+        data: indexMode ? [] : avgs,
         connectNulls: false,
         showSymbol: false,
         symbol: "none",
@@ -622,6 +622,24 @@ function buildKlineOption(
     },
     tooltip: {
       trigger: "axis",
+      confine: true,
+      // 固定在主K线绘图区左上角，右侧预留区域属于价格轴/筹码峰。
+      position: (
+        _point: number[],
+        _params: unknown,
+        dom: HTMLElement,
+        _rect: unknown,
+        size: { viewSize: number[] },
+      ) => {
+        const plotWidth = Math.max(0, size.viewSize[0] - 12 - rightPad);
+        const plotHeight = size.viewSize[1] * 0.58;
+        dom.style.boxSizing = "border-box";
+        dom.style.minWidth = "0";
+        dom.style.maxWidth = `${Math.max(0, plotWidth - 16)}px`;
+        dom.style.maxHeight = `${Math.max(0, plotHeight - 16)}px`;
+        dom.style.overflow = "auto";
+        return [20, 36];
+      },
       axisPointer: {
         type: "cross",
         label: { backgroundColor: ptrBg },
@@ -1197,16 +1215,25 @@ export function StockChartModal({
   open,
   onClose,
   asOfDate,
+  initialTab = "trends",
+  initialChipOn = false,
+  openDayOnClick = false,
 }: {
   stock: ChartStock | null;
   open: boolean;
   onClose: () => void;
   /** 历史回溯指定交易日 YYYYMMDD / YYYY-MM-DD，分时按该日、日K定位到该日 */
   asOfDate?: string | null;
+  initialTab?: "trends" | "kline";
+  initialChipOn?: boolean;
+  openDayOnClick?: boolean;
 }) {
   const [tab, setTab] = useState<"trends" | "kline">("trends");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [kError, setKError] = useState("");
+  const [kLoading, setKLoading] = useState(false);
+  const [retry, setRetry] = useState(0);
   const [trends, setTrends] = useState<{
     points: TrendPoint[];
     preClose: number;
@@ -1279,15 +1306,15 @@ export function StockChartModal({
 
   useEffect(() => {
     if (!open) return;
-    setTab("trends");
+    setTab(initialTab);
     setTrends(null);
     setKlines(null);
     setKIndex(-1);
     setError("");
-    setChipOn(false);
+    setChipOn(initialChipOn);
     setPeekDay("");
     setViewDate(normBarDate(asOfDate || ""));
-  }, [open, stock?.code, asOfDate]);
+  }, [open, stock?.code, asOfDate, initialTab, initialChipOn]);
 
   const disposeChart = useCallback(() => {
     roRef.current?.disconnect();
@@ -1352,7 +1379,13 @@ export function StockChartModal({
           if (zrDblClickRef.current) zr.off("dblclick", zrDblClickRef.current);
           zrClickRef.current = (e: { offsetX: number; offsetY: number }) => {
             const idx = pickKIndexFromPixel(chart, e.offsetX, e.offsetY, klines);
-            if (idx >= 0) kPickRef.current(idx);
+            if (idx >= 0) {
+              kPickRef.current(idx);
+              if (openDayOnClick) {
+                const day = normBarDate(klines[idx]?.date || "");
+                if (day) peekDayRef.current(day);
+              }
+            }
           };
           zrDblClickRef.current = (e: { offsetX: number; offsetY: number }) => {
             const idx = pickKIndexFromPixel(chart, e.offsetX, e.offsetY, klines);
@@ -1393,7 +1426,7 @@ export function StockChartModal({
       setError("图表渲染失败");
       return false;
     }
-  }, [ensureChart, tab, trends, klines, dark, focusDay, chipPayload]);
+  }, [ensureChart, tab, trends, klines, dark, focusDay, chipPayload, openDayOnClick]);
 
   // 始终预拉日K：交易日历 + 筹码峰原料
   useEffect(() => {
@@ -1401,6 +1434,8 @@ export function StockChartModal({
     let cancelled = false;
     const code = stock.code;
     const loadK = async () => {
+      setKLoading(true);
+      setKError("");
       const ckey = `kline:v4:${code}:${KLINE_LIMIT}`;
       const cached = cacheGet<KBar[]>(ckey);
       if (cached?.length && klineCacheFresh(cached)) {
@@ -1414,7 +1449,9 @@ export function StockChartModal({
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         if (cancelled) return;
+        if (data.error) throw new Error(String(data.error));
         const bars = (data.bars || []) as KBar[];
+        if (!bars.length) throw new Error("未取得日K数据，请检查网络或代理设置后重试");
         setKlines(bars);
         const fi = focusDay
           ? bars.findIndex((b) => normBarDate(b.date) === focusDay)
@@ -1424,7 +1461,9 @@ export function StockChartModal({
           cacheSet(ckey, bars, 30);
         }
       } catch (e) {
-        console.error(e);
+        if (!cancelled) setKError(e instanceof Error ? e.message : "日K加载失败，请重试");
+      } finally {
+        if (!cancelled) setKLoading(false);
       }
     };
     void loadK();
@@ -1433,7 +1472,7 @@ export function StockChartModal({
     };
     // 仅随股票切换重拉；focusDay 变化时在下方同步 kIndex
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, stock?.code]);
+  }, [open, stock?.code, retry]);
 
   useEffect(() => {
     if (!klines?.length) return;
@@ -1504,7 +1543,7 @@ export function StockChartModal({
     return () => {
       cancelled = true;
     };
-  }, [open, stock, tab, focusDay, viewDate, klines?.length]);
+  }, [open, stock, tab, focusDay, viewDate, klines?.length, retry]);
 
   useEffect(() => {
     if (!open) return;
@@ -1662,13 +1701,16 @@ export function StockChartModal({
             <ChipInfoBar cyq={chipPayload.result} />
           ) : null}
           <div className="stock-chart-body">
-            <Spin spinning={loading} className="stock-chart-spin">
+            <Spin spinning={tab === "kline" ? kLoading : loading} tip="正在加载图形…" className="stock-chart-spin">
               <div
                 ref={setBoxRef}
                 className="stock-chart-box"
                 key={`${stock?.code || "x"}-${tab}-${focusDay || "live"}-${chipOn ? "chip" : "0"}-${open ? "1" : "0"}`}
               />
-              {error ? <div className="chart-error">{error}</div> : null}
+              {(tab === "kline" ? kError : error) ? <div className="chart-error">
+                {tab === "kline" ? kError : error}
+                <Button size="small" style={{ marginLeft: 12 }} onClick={() => setRetry((value) => value + 1)}>重试</Button>
+              </div> : null}
             </Spin>
           </div>
         </div>

@@ -10,7 +10,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV="$ROOT/.venv"
 HOST="127.0.0.1"
-BACKEND_PORT="${DINGPAN_PORT:-17831}"
+export DINGPAN_PORT="${DINGPAN_PORT:-17831}"
+BACKEND_PORT="$DINGPAN_PORT"
 FRONTEND_PORT="5173"
 MANAGED_NODE_DIR="$ROOT/.tools/node"
 
@@ -39,13 +40,13 @@ setup_env() {
   else
     if UV="$(uv_bin)"; then
       log "用 uv 创建 venv（Python 3.11，本机缺失时 uv 会自动下载）..."
-      rm -rf "$VENV"
+      [ ! -d "$VENV" ] || die ".venv 不兼容当前系统，请先重命名它再重试（虚拟环境不能跨系统复制）"
       "$UV" venv "$VENV" --python 3.11
     else
       local PY
       PY="$(pick_py311)" || die "既没有 uv 也没有 Python 3.11+。建议安装 uv: curl -LsSf https://astral.sh/uv/install.sh | sh"
       log "未检测到 uv，退回用 $PY 创建 venv..."
-      rm -rf "$VENV"
+      [ ! -d "$VENV" ] || die ".venv 不兼容当前系统，请先重命名它再重试（虚拟环境不能跨系统复制）"
       "$PY" -m venv "$VENV"
     fi
   fi
@@ -57,9 +58,9 @@ setup_env() {
   fi
 }
 
-node_ok() { # vite 8 要求 Node >= 20.19
-  command -v node >/dev/null 2>&1 || return 1
-  node -e 'const[a,b]=process.versions.node.split(".").map(Number);process.exit((a>20||(a===20&&b>=19))?0:1)' >/dev/null 2>&1
+node_ok() { # Vite engines: ^20.19.0 || >=22.12.0
+  command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 || return 1
+  node -e 'const[a,b]=process.versions.node.split(".").map(Number);process.exit(((a===20&&b>=19)||a>22||(a===22&&b>=12))?0:1)' >/dev/null 2>&1
 }
 
 ensure_node() { # 系统 Node 过旧时，自动下载便携 Node 22 LTS 到 .tools/（不动系统 Node）
@@ -68,16 +69,17 @@ ensure_node() { # 系统 Node 过旧时，自动下载便携 Node 22 LTS 到 .to
     export PATH="$MANAGED_NODE_DIR/bin:$PATH"
     node_ok && return
   fi
-  local arch ver tmp
-  case "$(uname -m)" in arm64) arch="arm64" ;; *) arch="x64" ;; esac
+  local arch platform ver tmp
+  case "$(uname -s)" in Darwin) platform="darwin" ;; Linux) platform="linux" ;; *) die "本脚本仅支持 macOS/Linux" ;; esac
+  case "$(uname -m)" in arm64|aarch64) arch="arm64" ;; x86_64) arch="x64" ;; *) die "不支持的 CPU 架构" ;; esac
   ver="v22.14.0"
-  log "未找到 Node >= 20.19（当前 $(command -v node >/dev/null 2>&1 && node -v || echo 无)），下载便携 ${ver} 到 .tools/ ..."
+  log "未找到 Node 20.19.x 或 22.12+（当前 $(command -v node >/dev/null 2>&1 && node -v || echo 无)），下载便携 ${ver} 到 .tools/ ..."
   mkdir -p "$ROOT/.tools"
   tmp="$(mktemp -d)"
-  curl -fsSL "https://nodejs.org/dist/${ver}/node-${ver}-darwin-${arch}.tar.gz" -o "$tmp/node.tar.gz"
+  curl -fsSL "https://nodejs.org/dist/${ver}/node-${ver}-${platform}-${arch}.tar.gz" -o "$tmp/node.tar.gz"
   tar -xzf "$tmp/node.tar.gz" -C "$tmp"
   rm -rf "$MANAGED_NODE_DIR"
-  mv "$tmp/node-${ver}-darwin-${arch}" "$MANAGED_NODE_DIR"
+  mv "$tmp/node-${ver}-${platform}-${arch}" "$MANAGED_NODE_DIR"
   rm -rf "$tmp"
   export PATH="$MANAGED_NODE_DIR/bin:$PATH"
   node_ok || die "便携 Node 安装后仍不满足版本要求"
@@ -88,35 +90,25 @@ ensure_node_deps() {
   ensure_node
   if [ ! -d "$ROOT/apps/web/node_modules" ]; then
     log "安装前端依赖（首次较慢）..."
-    (cd "$ROOT/apps/web" && npm install --no-fund --no-audit)
+    (cd "$ROOT/apps/web" && npm ci --no-fund --no-audit)
   fi
 }
 
-free_port() { # $1=端口 $2=进程关键词，仅自动清理匹配的残留进程
-  local pid
-  if pid="$(lsof -ti "tcp:$1" 2>/dev/null | head -n1)" && [ -n "$pid" ]; then
-    if ps -p "$pid" -o command= 2>/dev/null | grep -qi "$2"; then
-      log "端口 $1 被残留 $2 进程占用 (pid=$pid)，自动清理"
-      kill "$pid" 2>/dev/null || true
-      sleep 1
-    else
-      log "警告: 端口 $1 被其他进程占用 (pid=$pid)，$2 可能启动失败"
-    fi
-  fi
-}
-
-warn_port() {
-  local pid
-  if pid="$(lsof -ti "tcp:$1" 2>/dev/null | head -n1)" && [ -n "$pid" ]; then
-    log "警告: 端口 $1 已被占用 (pid=$pid)，Vite 可能会换端口，注意下方输出"
-  fi
+check_port() {
+  "$VENV/bin/python" - "$1" <<'PY'
+import socket, sys
+with socket.socket() as probe:
+    probe.settimeout(1)
+    if probe.connect_ex(("127.0.0.1", int(sys.argv[1]))) == 0:
+        sys.exit(f"[DingPan] 端口 {sys.argv[1]} 已占用，请先停止原实例；不会结束其他程序")
+PY
 }
 
 cmd_dev() {
   setup_env
   ensure_node_deps
-  free_port "$BACKEND_PORT" uvicorn
-  warn_port "$FRONTEND_PORT"
+  check_port "$BACKEND_PORT"
+  check_port "$FRONTEND_PORT"
 
   ( cd "$ROOT/apps/server" && exec "$VENV/bin/python" -m uvicorn app.main:app \
       --host "$HOST" --port "$BACKEND_PORT" --reload ) &
@@ -133,11 +125,11 @@ cmd_dev() {
   trap 'exit 143' TERM
 
   ( sleep 3
-    if command -v open >/dev/null 2>&1; then open "http://localhost:$FRONTEND_PORT/"
-    elif command -v xdg-open >/dev/null 2>&1; then xdg-open "http://localhost:$FRONTEND_PORT/"
+    if command -v open >/dev/null 2>&1; then open "http://127.0.0.1:$FRONTEND_PORT/"
+    elif command -v xdg-open >/dev/null 2>&1; then xdg-open "http://127.0.0.1:$FRONTEND_PORT/"
     fi ) &
 
-  log "前端启动中  http://localhost:$FRONTEND_PORT  (Vite HMR；Ctrl+C 退出全部)"
+  log "前端启动中  http://127.0.0.1:$FRONTEND_PORT  (Vite HMR；Ctrl+C 退出全部)"
   cd "$ROOT/apps/web" && npm run dev
 }
 
@@ -152,5 +144,6 @@ case "${1:-dev}" in
   dev)            cmd_dev ;;
   --setup-only)   setup_env; ensure_node_deps; log "环境就绪: $VENV" ;;
   --desktop)      cmd_desktop ;;
-  *)              die "用法: dev.sh [--setup-only|--desktop]" ;;
+  --stop)         bash "$ROOT/scripts/stop.sh" ;;
+  *)              die "用法: dev.sh [--setup-only|--desktop|--stop]" ;;
 esac

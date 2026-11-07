@@ -22,9 +22,6 @@ import {
   type SpeedFilterTemplate,
 } from "../lib/speedFilterTemplates";
 
-export type { SpeedFilter };
-export { EMPTY_SPEED_FILTER, applySpeedFilter } from "../lib/speedFilter";
-
 function RangeField({
   label,
   min,

@@ -34,13 +34,14 @@ function Write-Ok([string]$msg) {
     Write-Host "    OK  $msg" -ForegroundColor Green
 }
 
-function Get-NodeMajor([string]$NodeExe) {
+function Test-NodeVersion([string]$NodeExe) {
     try {
         $raw = & $NodeExe -v 2>$null
-        if (-not $raw) { return 0 }
-        return [int]($raw.ToString().TrimStart("v").Split(".")[0])
+        if (-not $raw) { return $false }
+        $version = [version]$raw.ToString().Trim().TrimStart("v")
+        return (($version.Major -eq 20 -and $version -ge [version]"20.19.0") -or $version -ge [version]"22.12.0")
     } catch {
-        return 0
+        return $false
     }
 }
 
@@ -63,8 +64,7 @@ function Resolve-NvmRoot {
 }
 
 function Add-NodeToPath {
-    # Vite 8 需要 Node >= 20；优先选够用的版本，避免 nvm 默认停在 14 导致「假成功」旧包
-    $minMajor = 20
+    # Vite 8 需要 Node 20.19.x 或 22.12+；优先选够用的版本，避免 nvm 默认停在 14 导致「假成功」旧包
     $candidates = New-Object System.Collections.Generic.List[string]
 
     $nvmRoot = Resolve-NvmRoot
@@ -99,13 +99,13 @@ function Add-NodeToPath {
 
     $picked = $null
     foreach ($exe in $candidates) {
-        if ((Get-NodeMajor $exe) -ge $minMajor) {
+        if (Test-NodeVersion $exe) {
             $picked = $exe
             break
         }
     }
     if (-not $picked) {
-        throw "需要 Node.js >= 20（当前过旧或未安装）。可用 nvm: nvm install 22 && nvm use 22"
+        throw "需要 Node.js 20.19.x 或 22.12+（当前过旧或未安装）。可用 nvm: nvm install 22 && nvm use 22"
     }
     $dir = Split-Path -Parent $picked
     $env:Path = "$dir;" + $env:Path
@@ -179,7 +179,7 @@ if (-not $SkipBuild) {
     Get-ChildItem $WebDist -Recurse -File -ErrorAction SilentlyContinue |
         ForEach-Object { if ($_.LastWriteTime.ToFileTimeUtc() -gt $afterStamp) { $afterStamp = $_.LastWriteTime.ToFileTimeUtc() } }
     if ($afterStamp -le $beforeStamp) {
-        throw "frontend dist 未更新（构建可能静默失败，请确认 Node >= 20）"
+        throw "frontend dist 未更新（构建可能静默失败，请确认 Node 20.19.x 或 22.12+）"
     }
     Write-Ok "frontend built"
 

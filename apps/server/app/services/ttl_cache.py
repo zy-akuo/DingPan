@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from typing import Any
 
 import aiosqlite
 
 from ..config import settings
+
+logger = logging.getLogger(__name__)
 
 CACHE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS payload_cache (
@@ -28,6 +31,14 @@ class TtlCache:
     def __init__(self) -> None:
         self._mem: dict[str, tuple[float, Any]] = {}
         self._lock_ready = False
+        self._last_log: dict[str, float] = {}
+
+    def _log_failure(self, operation: str) -> None:
+        # 同类故障至多每分钟输出一次，避免盘中轮询刷屏。
+        now = time.monotonic()
+        if now - self._last_log.get(operation, float("-inf")) >= 60:
+            self._last_log[operation] = now
+            logger.warning("持久化缓存%s失败，继续使用内存缓存", operation, exc_info=True)
 
     async def init(self) -> None:
         settings.data_dir.mkdir(parents=True, exist_ok=True)
@@ -78,6 +89,7 @@ class TtlCache:
             self.mem_set(key, data, max(1.0, float(expires_at) - self._now()))
             return data
         except Exception:
+            self._log_failure("读取")
             return None
 
     async def set(self, key: str, value: Any, ttl_sec: float, kind: str = "generic") -> None:
@@ -100,7 +112,7 @@ class TtlCache:
                 )
                 await db.commit()
         except Exception:
-            pass
+            self._log_failure("写入")
 
     async def purge_expired(self) -> int:
         now = self._now()
@@ -113,6 +125,7 @@ class TtlCache:
                 await db.commit()
                 return int(cur.rowcount or 0) + len(dead)
         except Exception:
+            self._log_failure("清理")
             return len(dead)
 
     async def cleanup_loop(self, interval_sec: float = 600.0) -> None:
@@ -121,7 +134,7 @@ class TtlCache:
             try:
                 await self.purge_expired()
             except Exception:
-                pass
+                self._log_failure("定时清理")
             await asyncio_sleep(interval_sec)
 
 

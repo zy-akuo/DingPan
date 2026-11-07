@@ -1,4 +1,4 @@
-import { ReloadOutlined, SearchOutlined } from "@ant-design/icons";
+import { LineChartOutlined, ReloadOutlined, SearchOutlined } from "@ant-design/icons";
 import {
   Button,
   Empty,
@@ -11,20 +11,22 @@ import {
   Tag,
   message,
 } from "antd";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   BOARD_TAB_OPTIONS,
   matchBoardBucket,
   type BoardBucket,
 } from "../lib/boardBucket";
+import { StockChartModal } from "./StockChartModal";
 import { AuctionVirtualList } from "./AuctionVirtualList";
-import { collectRegions } from "./MonitorFilterBar";
+import { collectRegions } from "../lib/monitorFilter";
 import { matchNameOrInitials } from "../lib/stockMatch";
 import { filterStItems } from "../lib/stStock";
 import type { StockItem } from "../types";
 import { formatMoney, formatPct } from "../types";
 
-const BOARD_ROW_H = 40;
+// 与 .auction-wide-row 的实际高度一致，避免虚拟列表额外占位。
+const BOARD_ROW_H = 26;
 const LIST_MAX_H = 560;
 
 type AuctionStock = {
@@ -279,7 +281,9 @@ function useStablePoll<T extends { phase?: string; display_mode?: string }>(
   const timer = useRef<number | null>(null);
   const frozen = useRef<string>("");
   const fetcherRef = useRef(fetcher);
-  fetcherRef.current = fetcher;
+  useLayoutEffect(() => {
+    fetcherRef.current = fetcher;
+  }, [fetcher]);
 
   const shouldPoll =
     data?.phase === "auction" ||
@@ -391,26 +395,35 @@ function AuctionTableRow({
   searching,
   hit,
   onOpen,
+  onOpenChart,
 }: {
   stock: AuctionStock;
   searching: boolean;
   hit: boolean;
   onOpen?: (s: StockItem) => void;
+  onOpenChart: (s: StockItem) => void;
 }) {
   const dim = searching && !hit;
+  const boardLabel = Number(stock.board_count) >= 2
+    ? (stock.board_tag?.startsWith("昨") ? `昨${stock.board_count}板` : `${stock.board_count}板`)
+    : "";
   const concept = (stock.concepts || []).filter(Boolean).join("、") || "—";
   const region = (stock.region || "").trim() || "—";
   return (
-    <button
-      type="button"
+    <div
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onOpen?.(toStockItem(stock)); } }}
       className={`auction-wide-row${hit ? " auction-row-hit" : ""}${dim ? " auction-row-dim" : ""}`}
       onClick={() => onOpen?.(toStockItem(stock))}
     >
       <span className="col-name">
         <span className="auction-name">{stock.name}</span>
-        {stock.board_tag ? (
-          <span className="auction-chip board">{stock.board_tag}</span>
-        ) : null}
+        {boardLabel ? <span className="auction-chip board">{boardLabel}</span> : null}
+        <button type="button" className="auction-chart-btn" title={`查看${stock.name}日K及筹码峰`} aria-label={`查看${stock.name}图形`}
+          onClick={(e) => { e.stopPropagation(); onOpenChart(toStockItem(stock)); }}>
+          <LineChartOutlined />
+        </button>
         {stock.is_yizhi ? <span className="auction-chip yizhi">一字</span> : null}
       </span>
       <span className="col-t col-t915">
@@ -435,7 +448,7 @@ function AuctionTableRow({
       <span className="col-concept" title={concept}>
         {concept}
       </span>
-    </button>
+    </div>
   );
 }
 
@@ -443,11 +456,13 @@ function AuctionBoardTab({
   pollSec,
   enabled,
   onOpenDetail,
+  onOpenChart,
   showStStocks = true,
 }: {
   pollSec: number;
   enabled: boolean;
   onOpenDetail?: (s: StockItem) => void;
+  onOpenChart: (s: StockItem, date?: string) => void;
   showStStocks?: boolean;
 }) {
   const [kw, setKw] = useState("");
@@ -549,8 +564,9 @@ function AuctionBoardTab({
         <AuctionVirtualList
           className="auction-wide-list"
           items={items}
+          fillViewport
           rowHeight={BOARD_ROW_H}
-          maxHeight={Math.min(LIST_MAX_H, Math.max(160, items.length * BOARD_ROW_H + 8))}
+          maxHeight={Math.min(LIST_MAX_H, items.length * BOARD_ROW_H)}
           getKey={(s) => s.code}
           renderRow={(s) => (
             <AuctionTableRow
@@ -558,6 +574,7 @@ function AuctionBoardTab({
               searching={searching}
               hit={searching && !!hitCodes?.has(s.code)}
               onOpen={onOpenDetail}
+              onOpenChart={(stock) => onOpenChart(stock, col?.date || data?.display_date || data?.trade_date)}
             />
           )}
         />
@@ -645,11 +662,13 @@ function AuctionPrevTab({
   pollSec,
   enabled,
   onOpenDetail,
+  onOpenChart,
   showStStocks = true,
 }: {
   pollSec: number;
   enabled: boolean;
   onOpenDetail?: (s: StockItem) => void;
+  onOpenChart: (s: StockItem, date?: string) => void;
   showStStocks?: boolean;
 }) {
   const [kw, setKw] = useState("");
@@ -804,8 +823,10 @@ function AuctionPrevTab({
                       !Number.isNaN(pct) &&
                       pct >= nearLimitThr(s.code, s.name);
                     return (
-                      <button
-                        type="button"
+                      <div
+                        role="button"
+                        tabIndex={0}
+                        onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onOpenDetail?.(toStockItem(s)); } }}
                         key={s.code}
                         className={`ladder-stock${nearLimit ? " ladder-stock-ok" : ""}${hit ? " ladder-stock-hit" : ""}${dim ? " ladder-stock-dim" : ""}`}
                         onClick={() =>
@@ -823,6 +844,10 @@ function AuctionPrevTab({
                           <span className="nm-link auction-prev-name">
                             {s.name}
                           </span>
+                          <button type="button" className="auction-chart-btn" title={`查看${s.name}日K及筹码峰`} aria-label={`查看${s.name}图形`}
+                            onClick={(e) => { e.stopPropagation(); onOpenChart(toStockItem(s), data?.trade_date); }}>
+                            <LineChartOutlined />
+                          </button>
                           <span className={`pct ${pctClass(pct)}`}>
                             {pct == null ? "[ — ]" : `[ ${pctText(pct)} ]`}
                           </span>
@@ -836,7 +861,7 @@ function AuctionPrevTab({
                             <span className="region">停牌</span>
                           ) : null}
                         </div>
-                      </button>
+                      </div>
                     );
                   })}
                   {!g.stocks?.length ? (
@@ -861,11 +886,15 @@ export function AuctionPanel({
   onOpenDetail?: (s: StockItem) => void;
   showStStocks?: boolean;
 }) {
+  const [chart, setChart] = useState<{ stock: StockItem; date?: string } | null>(null);
+  const openChart = (stock: StockItem, date?: string) => setChart({ stock, date });
   const [tab, setTab] = useState("board");
   const sec = Math.max(1.0, Math.min(5, Number(pollSec) || 1.0));
 
   return (
     <div className="auction-panel">
+      <StockChartModal stock={chart?.stock || null} open={!!chart} onClose={() => setChart(null)}
+        asOfDate={chart?.date} initialTab="kline" initialChipOn openDayOnClick />
       <Tabs
         activeKey={tab}
         onChange={setTab}
@@ -879,6 +908,7 @@ export function AuctionPanel({
                 pollSec={sec}
                 enabled={tab === "board"}
                 onOpenDetail={onOpenDetail}
+                onOpenChart={openChart}
                 showStStocks={showStStocks}
               />
             ),
@@ -891,6 +921,7 @@ export function AuctionPanel({
                 pollSec={sec}
                 enabled={tab === "prev"}
                 onOpenDetail={onOpenDetail}
+                onOpenChart={openChart}
                 showStStocks={showStStocks}
               />
             ),

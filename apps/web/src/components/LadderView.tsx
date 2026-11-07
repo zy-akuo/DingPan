@@ -1,7 +1,8 @@
 import { SearchOutlined, UnorderedListOutlined } from "@ant-design/icons";
 import { Input, Segmented, Select, Space } from "antd";
-import { useMemo, useState } from "react";
-import { collectRegions } from "./MonitorFilterBar";
+import { useEffect, useMemo, useState } from "react";
+import { displayedLadderTheme as displayedTheme, ladderThemeOptions } from "../lib/ladderThemeFilter";
+import { collectRegions } from "../lib/monitorFilter";
 import { matchNameOrInitials } from "../lib/stockMatch";
 import type { LadderGroup, StockItem } from "../types";
 import { formatPct } from "../types";
@@ -172,21 +173,35 @@ export function LadderView({
   const [chartStock, setChartStock] = useState<StockItem | null>(null);
   const [keyword, setKeyword] = useState("");
   const [region, setRegion] = useState("");
+  const [theme, setTheme] = useState("");
   const [displayMode, setDisplayMode] = useState<DisplayMode>("all");
   const [sealTimeFrom, setSealTimeFrom] = useState("");
   const [sealTimeTo, setSealTimeTo] = useState("");
   const [breakTimeFrom, setBreakTimeFrom] = useState("");
   const [breakTimeTo, setBreakTimeTo] = useState("");
 
+  // 先应用展示状态，再从同一批股票生成题材选项和筛选结果。
+  const eligibleGroups = useMemo(() => groups.map((g) => ({
+    ...g,
+    stocks: g.stocks.filter((s) => matchDisplayMode(s.status, displayMode)),
+  })), [groups, displayMode]);
+
+  const themes = useMemo(
+    () => ladderThemeOptions(eligibleGroups.flatMap((g) => g.stocks)),
+    [eligibleGroups],
+  );
+  const activeTheme = themes.some((option) => option.value === theme) ? theme : "";
+
+  useEffect(() => {
+    if (theme && !themes.some((option) => option.value === theme)) setTheme("");
+  }, [theme, themes]);
+
   const visibleGroups = useMemo(
-    () =>
-      groups.map((g) => ({
-        ...g,
-        stocks: sortLadderStocks(
-          g.stocks.filter((s) => matchDisplayMode(s.status, displayMode)),
-        ),
-      })),
-    [groups, displayMode],
+    () => eligibleGroups.map((g) => ({
+      ...g,
+      stocks: sortLadderStocks(g.stocks.filter((s) => !activeTheme || displayedTheme(s) === activeTheme)),
+    })).filter((g) => !activeTheme || g.stocks.length > 0),
+    [eligibleGroups, activeTheme],
   );
 
   const regions = useMemo(
@@ -266,6 +281,20 @@ export function LadderView({
             optionFilterProp="label"
           />
         </Space>
+        <Space size={4} className="filter-item">
+          <span className="filter-label">题材</span>
+          <Select
+            allowClear
+            showSearch
+            placeholder="全部题材"
+            aria-label="题材概念筛选"
+            value={activeTheme || undefined}
+            onChange={(value) => setTheme(value || "")}
+            options={themes}
+            style={{ width: 160 }}
+            optionFilterProp="label"
+          />
+        </Space>
         <TimeRangeInputs
           label="封板时间"
           from={sealTimeFrom}
@@ -335,8 +364,15 @@ export function LadderView({
                       <span className={s.change_pct >= 0 ? "pct up" : "pct down"}>
                         [ {formatPct(s.change_pct)} ]
                       </span>
-                      <span className="concept">
-                        {s.concepts?.[0] || s.industry || ""}
+                      <span className="concept" title={`${s.reason || s.industry || "暂无题材信息"} · ${{
+                        kaipanla: "开盘啦当日主涨停题材",
+                        ths: "同花顺当日涨停原因，待开盘啦确认",
+                        previous_kaipanla: "近期开盘啦复盘题材，待当日确认",
+                        concept: "个股概念候选，待当日确认",
+                        industry: "行业兜底，待当日确认",
+                      }[s.reason_source || "industry"] || "题材候选"}${s.reason_date ? ` · ${s.reason_date}` : ""}`}>
+                        {displayedTheme(s)}
+                        {s.reason_source && s.reason_source !== "kaipanla" ? <small style={{ opacity: 0.65, marginLeft: 3 }}>参考</small> : null}
                       </span>
                       {s.region ? <span className="region">{s.region}</span> : null}
                       {onOpenDetail ? (

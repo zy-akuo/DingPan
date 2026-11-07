@@ -48,6 +48,8 @@ export interface StockItem {
   speed?: number | null;
   /** 异动原因 */
   reason?: string;
+  reason_source?: string;
+  reason_date?: string;
   /** 避雷啦风险标签：st / delist / warn */
   risk_tags?: string[];
   /** 风险说明 */

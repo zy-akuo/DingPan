@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
+import tempfile
 from pathlib import Path
 
 import aiosqlite
 
 from .config import settings
 from .models import FieldConfig, UserConfig, normalize_speed_table_columns
+
+logger = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS zt_history (
@@ -774,6 +779,7 @@ def load_user_config() -> UserConfig:
     try:
         cfg = UserConfig.model_validate_json(path.read_text(encoding="utf-8"))
     except Exception:
+        logger.warning("无法读取用户配置 %s，暂用默认配置，原文件保留", path, exc_info=True)
         cfg = UserConfig()
     cfg.fields.speed_table_columns = normalize_speed_table_columns(
         cfg.fields.speed_table_columns
@@ -785,10 +791,25 @@ def save_user_config(cfg: UserConfig) -> None:
     cfg.fields.speed_table_columns = normalize_speed_table_columns(
         cfg.fields.speed_table_columns
     )
-    settings.config_path.write_text(
-        cfg.model_dump_json(indent=2),
-        encoding="utf-8",
-    )
+    path = settings.config_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent,
+            prefix=f".{path.name}.", suffix=".tmp", delete=False,
+        ) as stream:
+            temporary = Path(stream.name)
+            stream.write(cfg.model_dump_json(indent=2))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    except OSError:
+        logger.exception("保存用户配置失败：%s", path)
+        raise
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def update_field_config(fields: FieldConfig) -> UserConfig:

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import type { AlertEvent, SpeechEvent } from "../types";
 
 type QueueItem = { text: string; kind: "normal" | "alert" };
@@ -18,10 +18,12 @@ export function useSpeech(
   const alertTypesRef = useRef(alertTypes);
   const cancelingRef = useRef(false);
 
-  enabledRef.current = enabled;
-  typesRef.current = types;
-  alertEnabledRef.current = alertEnabled;
-  alertTypesRef.current = alertTypes;
+  useLayoutEffect(() => {
+    enabledRef.current = enabled;
+    typesRef.current = types;
+    alertEnabledRef.current = alertEnabled;
+    alertTypesRef.current = alertTypes;
+  }, [enabled, types, alertEnabled, alertTypes]);
 
   const stopAll = useCallback(() => {
     queue.current = [];
@@ -42,7 +44,7 @@ export function useSpeech(
     });
   }, []);
 
-  const flush = useCallback(() => {
+  const flush = useCallback(function flushQueue() {
     if (speaking.current || cancelingRef.current) return;
     if (!window.speechSynthesis) return;
 
@@ -70,13 +72,13 @@ export function useSpeech(
     }
     u.onend = () => {
       speaking.current = false;
-      if (!cancelingRef.current) flush();
+      if (!cancelingRef.current) flushQueue();
     };
     u.onerror = () => {
       speaking.current = false;
       // cancel 触发的 error 不继续刷队列，避免开关切换时连环播报
       if (cancelingRef.current) return;
-      window.setTimeout(() => flush(), 200);
+      window.setTimeout(() => flushQueue(), 200);
     };
     window.speechSynthesis.speak(u);
   }, [pruneQueue]);

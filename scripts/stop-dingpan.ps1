@@ -1,101 +1,42 @@
 ﻿#Requires -Version 5.1
-<#
-.SYNOPSIS
-  Stop DingPan: free ports 17831/5173 and related python/node processes.
-#>
-$ErrorActionPreference = "Continue"
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-
-$ports = @(17831, 5173)
-$killed = New-Object System.Collections.Generic.HashSet[int]
-
-function Write-Step([string]$msg) {
-    Write-Host "==> $msg" -ForegroundColor Cyan
+# Stop only processes attributed to this checkout or portable directory.
+$ErrorActionPreference = "Stop"
+$Root = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot)).TrimEnd('\') + '\'
+$RootPattern = [regex]::Escape($Root)
+$processes = @(Get-CimInstance Win32_Process)
+$targets = New-Object 'System.Collections.Generic.HashSet[int]'
+$ancestors = New-Object 'System.Collections.Generic.HashSet[int]'
+$ancestorId = $PID
+while ($ancestorId -gt 0 -and $ancestors.Add($ancestorId)) {
+    $ancestor = $processes | Where-Object { $_.ProcessId -eq $ancestorId } | Select-Object -First 1
+    if (-not $ancestor) { break }
+    $ancestorId = [int]$ancestor.ParentProcessId
 }
-
-function Stop-PidSafe([int]$ProcessId, [string]$reason) {
-    if ($ProcessId -le 0) { return }
-    if ($killed.Contains($ProcessId)) { return }
-    try {
-        $p = Get-Process -Id $ProcessId -ErrorAction Stop
-        Write-Host ("    stop PID {0} ({1}) - {2}" -f $ProcessId, $p.ProcessName, $reason)
-        Stop-Process -Id $ProcessId -Force -ErrorAction Stop
-        [void]$killed.Add($ProcessId)
-    } catch {
-        # already exited
-    }
+foreach ($process in $processes) {
+    if ($ancestors.Contains([int]$process.ProcessId)) { continue }
+    $command = [string]$process.CommandLine
+    $executable = [string]$process.ExecutablePath
+    $belongsHere = ($command -match $RootPattern) -or $executable.StartsWith($Root, [StringComparison]::OrdinalIgnoreCase)
+    $isService = ($process.Name -match '^(pythonw?|node)(\.exe)?$') -and
+        ($command -match 'uvicorn|vite|launcher\.py|DingPan\.py')
+    if ($belongsHere -and $isService) { [void]$targets.Add([int]$process.ProcessId) }
 }
-
-function Stop-ByPort([int]$Port) {
-    try {
-        $conns = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
-        foreach ($c in $conns) {
-            Stop-PidSafe -ProcessId ([int]$c.OwningProcess) -reason ("port $Port")
-        }
-    } catch { }
-}
-
-Write-Step "Close DingPan console windows"
-try {
-    # Window titles from start-dev.bat
-    Get-Process cmd, powershell, pwsh -ErrorAction SilentlyContinue | ForEach-Object {
-        $t = $_.MainWindowTitle
-        if ($t -match "DingPan-Server|DingPan-Web|DingPan") {
-            Stop-PidSafe -ProcessId $_.Id -reason ("window: $t")
+# Include reload workers, whose command line may omit the application name.
+do {
+    $added = $false
+    foreach ($process in $processes) {
+        if ($targets.Contains([int]$process.ParentProcessId) -and -not $ancestors.Contains([int]$process.ProcessId)) {
+            if ($targets.Add([int]$process.ProcessId)) { $added = $true }
         }
     }
-} catch { }
-
-Write-Step "Free ports 17831 / 5173"
-foreach ($port in $ports) {
-    Stop-ByPort $port
+} while ($added)
+foreach ($processId in $targets) {
+    # Avoid terminating a recycled PID.
+    $original = $processes | Where-Object { $_.ProcessId -eq $processId } | Select-Object -First 1
+    $current = Get-CimInstance Win32_Process -Filter "ProcessId=$processId" -ErrorAction SilentlyContinue
+    if ($current -and $current.CreationDate -eq $original.CreationDate) {
+        Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
+        Write-Host "Stopped DingPan PID $processId"
+    }
 }
-
-Write-Step "Scan DingPan-related python / node"
-try {
-    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-        Where-Object {
-            $cmd = [string]$_.CommandLine
-            $name = [string]$_.Name
-            if (-not $cmd) { return $false }
-            $isPy = $name -match "python|uvicorn"
-            $isNode = $name -match "node"
-            $hit =
-                ($cmd -match "DingPan\.py") -or
-                ($cmd -match "apps\\server" -and $cmd -match "uvicorn") -or
-                ($cmd -match "app\.main:app") -or
-                ($cmd -match "apps\\web" -and $cmd -match "vite|npm") -or
-                ($cmd -match "17831" -and $isPy)
-            return $hit
-        } |
-        ForEach-Object {
-            Stop-PidSafe -ProcessId ([int]$_.ProcessId) -reason ("cmdline match")
-        }
-} catch { }
-
-Start-Sleep -Milliseconds 400
-
-# second pass for ports (child processes)
-foreach ($port in $ports) {
-    Stop-ByPort $port
-}
-
-$still = @()
-foreach ($port in $ports) {
-    try {
-        $c = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
-        if ($c) { $still += $port }
-    } catch { }
-}
-
-Write-Host ""
-if ($killed.Count -eq 0 -and $still.Count -eq 0) {
-    Write-Host "No running DingPan service found." -ForegroundColor Yellow
-} else {
-    Write-Host ("Stopped {0} process(es)." -f $killed.Count) -ForegroundColor Green
-}
-if ($still.Count -gt 0) {
-    Write-Host ("WARN: port still in use: {0}" -f ($still -join ", ")) -ForegroundColor Yellow
-    exit 1
-}
-exit 0
+if ($targets.Count -eq 0) { Write-Host "No processes belonging to this DingPan directory found." }

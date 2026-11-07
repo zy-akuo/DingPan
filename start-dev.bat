@@ -1,9 +1,20 @@
 @echo off
 setlocal EnableExtensions
 set "ROOT=%~dp0"
-set "PATH=C:\nvm4w\nodejs;%PATH%"
+set "PATH=%ROOT%.tools\nodejs;%PATH%"
 set "WEB_URL=http://127.0.0.1:5173/"
 set "API_URL=http://127.0.0.1:17831/api/health"
+
+node -e "const [a,b]=process.versions.node.split('.').map(Number);process.exit(((a===20&&b>=19)||a>22||(a===22&&b>=12))?0:1)" >nul 2>&1
+if errorlevel 1 (
+  echo [FAIL] Node.js 20.19.x or 22.12+ is required. Run the install launcher first.
+  exit /b 1
+)
+where npm >nul 2>&1
+if errorlevel 1 (
+  echo [FAIL] npm was not found. Install Node.js with npm first.
+  exit /b 1
+)
 
 echo [DingPan] Starting backend on 127.0.0.1:17831 ...
 start "DingPan-Server" cmd /k "cd /d "%ROOT%apps\server" && "%ROOT%.venv\Scripts\python.exe" -m uvicorn app.main:app --host 127.0.0.1 --port 17831 --reload"

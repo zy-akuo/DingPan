@@ -1,6 +1,6 @@
 # 盯盘 · A股涨停实时盯盘
 
-Windows 本地客户端：涨停 / 连板 / 炸板实时监控、连板天梯、语音播报、涨停雷达、筛选跳转、本地缓存加速。
+Windows / macOS 本地客户端：涨停 / 连板 / 炸板实时监控、连板天梯、语音播报、涨停雷达、筛选跳转、本地缓存加速。
 
 技术栈：Vite + React + Ant Design + ECharts；FastAPI + SQLite；桌面壳 **pywebview + 便携 Python**（发给别人的安装包自带运行时，**无需预装 Node / Python**）。
 
@@ -125,7 +125,8 @@ powershell -ExecutionPolicy Bypass -File packaging\prepare-resources.ps1 -OpenFo
 
 ### 要求
 
-- Node.js 18+、Python 3.11+、Windows 10/11 + WebView2
+- Node.js `20.19.x` 或 `22.12+`（建议使用 22.12+）、Python 3.11+
+- Windows 10/11 + WebView2；macOS 使用系统 WebKit，不安装 WebView2
 
 ### 安装与启动
 
@@ -155,7 +156,7 @@ start-desktop.bat --skip-build --skip-pip
 停止盯盘.bat
 ```
 
-（或 `stop.bat`）结束占用 `17831` / `5173` 的盯盘后端与前端进程。
+（或 `stop.bat`）仅结束能够确认属于当前项目目录的盯盘进程，不会按端口直接结束其他程序。
 
 ### 目录结构
 
@@ -194,3 +195,74 @@ DingPan/
 ```
 
 得到 `packaging\out\DingPan-Setup-*.exe`（也可手动编译 `packaging\DingPan.iss`）。
+
+
+## macOS（Intel / Apple Silicon）
+
+目前提供源码运行方式，浏览器与 pywebview 桌面窗口共用同一套前后端。
+`packaging/out/DingPan-portable.zip` 和 Inno Setup 产物仅适用于 Windows；尚未提供签名、公证的 macOS `.app` / `.dmg`。
+
+先安装 Python 3.11+ 或 uv，建议使用 Python 3.11 / 3.12。不要从 Windows 复制 `.venv`、`node_modules`、`.tools`，这些目录需要在 Mac 上重新创建。
+
+在终端切换到项目目录，然后执行：
+
+```bash
+# 准备环境；有 uv 时可自动取得 Python，缺少合适 Node 时下载对应 CPU 的 Node
+bash scripts/dev.sh --setup-only
+
+# 桌面模式：按需构建前端后打开窗口
+bash scripts/dev.sh --desktop
+
+# 或浏览器开发模式（前后端热更新），Ctrl+C 退出
+bash scripts/dev.sh
+
+# 在另一个终端停止当前目录的盯盘进程
+bash scripts/dev.sh --stop
+```
+
+也可以使用 `make setup`、`make desktop`、`make dev`、`make stop`。
+第一次使用 Finder 双击入口前，执行：
+
+```bash
+chmod +x *.command
+```
+
+随后双击 `启动盯盘.command`、`开发模式.command` 或 `停止盯盘.command`。
+首次安装需要联网；若没有 uv 和 Python，先安装其中一个，脚本会给出提示。
+macOS 桌面模式需要 pywebview 的 PyObjC 依赖，安装 requirements 时由平台依赖自动安装；渲染器使用系统 WKWebView。
+官方说明：<https://pywebview.flowrl.com/guide/installation.html>。
+
+macOS 用户配置和数据库位于 `~/Library/Application Support/DingPan/`。
+开发端口默认 17831 / 5173；端口冲突时脚本报错并保留其他程序。
+如需改后端端口，使用 `DINGPAN_PORT=17832 bash scripts/dev.sh`，前端代理随之调整。
+语音使用系统语音能力，是否可用及中文音色需在目标 Mac 实测。
+
+## 工程检查
+
+```bash
+npm --prefix apps/web run lint
+npm --prefix apps/web test
+npm --prefix apps/web run build
+# Windows 将下方解释器替换为 .venv\Scripts\python.exe
+.venv/bin/python -m unittest discover -s tests -v
+.venv/bin/python -m pip check
+```
+
+工程测试使用隔离的临时数据目录，不读取或改写实际用户设置和行情数据库。
+配置保存使用同目录临时文件和原子替换；读取异常会保留原文件并记录告警。
+缓存持久化故障会记录限频日志，仍按原有策略回退，不改变行情和缓存时效规则。
+
+前端 Hook 单元测试通过模拟浏览器 API 检查 WebSocket 回调更新、重连清理、语音队列顺序与去重，不替代真实浏览器或 macOS 原生窗口验收。
+
+
+## 连接状态与提醒
+
+- 顶部区分「连接中 / 已连接 / 重连中」，断线时说明当前保留的是上次收到的数据，并提供「立即重连」。
+- 自动重试间隔依次为 2、4、8、16、30 秒，后续保持 30 秒；单次连接等待超过 10 秒会重新尝试。恢复连接后重置重试间隔。
+- 网络恢复时立即尝试重连；浏览器网络状态不会主动断开仍可使用的本地连接。
+- 曾成功连接后持续断线 5 秒才弹出页内提醒，同类断线提醒最多每分钟一次；有过断线提醒时，恢复后提示一次。
+- 点击连接状态旁的铃铛，可开启「系统连接提醒」并发送测试提醒。默认关闭，仅在用户操作时申请通知权限，偏好保存在本机浏览器。
+- 系统提醒只用于连接断开和恢复，在窗口后台或失去焦点时提交；系统是否展示取决于浏览器、桌面 WebView、通知权限和勿扰模式。不支持时保留页内提示，不影响行情功能。
+- 「已连接」仅表示本地服务连接正常，请结合行情更新时间判断数据是否更新。
+
+通知 API 说明：<https://developer.mozilla.org/en-US/docs/Web/API/Notifications_API/Using_the_Notifications_API>。

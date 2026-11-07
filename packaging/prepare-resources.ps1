@@ -66,7 +66,11 @@ if (-not $SkipFrontend) {
     Add-NodeToPath
     $node = Get-Command node -ErrorAction SilentlyContinue
     if (-not $node) {
-        throw "node.exe not found. Install Node.js 18+ and retry."
+        throw "node.exe not found. Install Node.js 20.19.x or >=22.12.0 and retry."
+    }
+    $nodeVersion = [version]((& node -v).Trim().TrimStart("v"))
+    if (-not (($nodeVersion.Major -eq 20 -and $nodeVersion -ge [version]"20.19.0") -or $nodeVersion -ge [version]"22.12.0")) {
+        throw "Unsupported Node version: $nodeVersion. Require 20.19.x or >=22.12.0."
     }
     Write-Host "    node: $($node.Source)"
 

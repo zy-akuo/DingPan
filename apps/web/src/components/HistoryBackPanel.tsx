@@ -25,9 +25,12 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
+import { historyTheme, historyThemeGroups, historyThemeColors, summarizeHistoryGroup } from "../lib/historyTheme";
+import { normalizeYmd, writeStoredDate } from "../lib/historyDate";
 import { matchNameOrInitials } from "../lib/stockMatch";
 import { filterStItems, isStLikeName } from "../lib/stStock";
 import type {
@@ -38,7 +41,7 @@ import type {
   StockZtHistoryResult,
 } from "../types";
 import { formatMoney, formatPct, tradeDateLabel } from "../types";
-import { collectRegions } from "./MonitorFilterBar";
+import { collectRegions } from "../lib/monitorFilter";
 import { MonitorTable } from "./MonitorTable";
 import { StockChartModal } from "./StockChartModal";
 
@@ -48,8 +51,6 @@ dayjs.extend(customParseFormat);
 dayjs.locale("zh-cn");
 
 type ViewMode = "ladder" | "concept";
-
-const HISTORY_DATE_KEY = "dingpan.historyDate";
 
 function toYmd(d: Dayjs): string {
   return d.format("YYYYMMDD");
@@ -66,32 +67,6 @@ function fromYmd(s: string): Dayjs {
     if (parsed.isValid()) return parsed;
   }
   return dayjs();
-}
-
-function normalizeYmd(s: string | undefined | null, fallback?: string): string {
-  const raw = (s || "").replace(/-/g, "").trim();
-  if (raw.length === 8 && /^\d{8}$/.test(raw)) return raw;
-  const fb = (fallback || "").replace(/-/g, "").trim();
-  if (fb.length === 8 && /^\d{8}$/.test(fb)) return fb;
-  return dayjs().format("YYYYMMDD");
-}
-
-function readStoredDate(): string | null {
-  try {
-    const v = sessionStorage.getItem(HISTORY_DATE_KEY);
-    if (v && /^\d{8}$/.test(v)) return v;
-  } catch {
-    /* ignore */
-  }
-  return null;
-}
-
-function writeStoredDate(ds: string) {
-  try {
-    sessionStorage.setItem(HISTORY_DATE_KEY, ds);
-  } catch {
-    /* ignore */
-  }
 }
 
 function ensureReasonColumn(columns: string[]): string[] {
@@ -114,11 +89,6 @@ function shiftTradeDay(ymd: string, delta: number): string {
   return toYmd(cur);
 }
 
-/** 供 App 初始化历史日期：优先会话缓存，其次交易日 */
-export function resolveHistoryDate(tradeDate?: string): string {
-  return normalizeYmd(readStoredDate(), tradeDate);
-}
-
 function sealTimeShort(t?: string): string {
   if (!t) return "";
   // HH:MM:SS -> H:MM / HH:MM
@@ -137,15 +107,17 @@ function StockChip({
   hit,
   dim,
   chipRef,
+  themeColor,
 }: {
   stock: StockItem;
+  themeColor: string;
   onClick: (s: StockItem) => void;
   onOpenChart?: (s: StockItem) => void;
   hit?: boolean;
   dim?: boolean;
   chipRef?: (el: HTMLDivElement | null) => void;
 }) {
-  const concept = stock.reason || stock.concepts?.[0] || stock.industry || "";
+  const concept = historyTheme(stock);
   const region = (stock.region || "").trim();
   const cls = [
     "kpl-chip",
@@ -171,7 +143,7 @@ function StockChip({
     >
       <span className="kpl-chip-time">{sealTimeShort(stock.first_seal_time)}</span>
       <span className="kpl-chip-name">{stock.name}</span>
-      {concept ? <span className="kpl-chip-concept">{concept}</span> : null}
+      {concept ? <span className="kpl-chip-concept" style={{ color: themeColor }}>{concept}</span> : null}
       {stock.zt_stats && /一字/.test(stock.zt_stats) ? (
         <span className="kpl-chip-tag">一字</span>
       ) : null}
@@ -335,7 +307,7 @@ export function HistoryBackPanel({
     const mapGroups = (groups: HistoryGroup[]) =>
       (groups || []).map((g) => {
         const stocks = filterStItems(g.stocks || [], false);
-        return { ...g, stocks, count: stocks.length };
+        return summarizeHistoryGroup(g, stocks);
       });
     const items = filterStItems(data.items || [], false);
     return {
@@ -371,19 +343,15 @@ export function HistoryBackPanel({
     [viewData],
   );
 
-  const conceptGroups = useMemo(() => {
-    const raw = viewData?.concept_groups || [];
-    if (!kw.trim() && !region.trim()) return raw;
-    return raw
-      .map((g) => {
-        const stocks = (g.stocks || [])
-          .filter(filterByReason)
-          .filter(filterByRegion);
-        if (!stocks.length) return null;
-        return { ...g, stocks, count: stocks.length };
-      })
-      .filter(Boolean) as HistoryGroup[];
-  }, [viewData, kw, region, filterByReason, filterByRegion]);
+  const allThemeGroups = useMemo(
+    () => historyThemeGroups((viewData?.board_groups || []).flatMap((g) => g.stocks || [])),
+    [viewData],
+  );
+  const themeColors = useMemo(() => historyThemeColors(allThemeGroups), [allThemeGroups]);
+  const conceptGroups = useMemo(() => allThemeGroups
+    .map((g) => summarizeHistoryGroup(g, g.stocks.filter(filterByReason).filter(filterByRegion)))
+    .filter((g) => g.count > 0),
+  [allThemeGroups, filterByReason, filterByRegion]);
 
   const boardGroups = useMemo(() => {
     const raw = viewData?.board_groups || [];
@@ -393,16 +361,12 @@ export function HistoryBackPanel({
           .filter(filterByReason)
           .filter(filterByRegion);
         if (activeConcept) {
-          stocks = stocks.filter((s) => {
-            const primary = (s.reason || s.industry || "").trim();
-            if (primary === activeConcept) return true;
-            return (s.concepts || []).some((c) => c === activeConcept);
-          });
+          stocks = stocks.filter((s) => historyTheme(s) === activeConcept);
         }
         if (!stocks.length && (kw.trim() || region.trim() || activeConcept)) {
           return null;
         }
-        return { ...g, stocks, count: stocks.length };
+        return summarizeHistoryGroup(g, stocks);
       })
       .filter(Boolean) as HistoryGroup[];
   }, [viewData, kw, region, filterByReason, filterByRegion, activeConcept]);
@@ -600,6 +564,7 @@ export function HistoryBackPanel({
       <StockChip
         key={`${gKey}-${s.code}`}
         stock={s}
+        themeColor={themeColors.get(historyTheme(s)) || "var(--muted)"}
         onClick={onRowClick}
         onOpenChart={setChartStock}
         hit={hit}
@@ -852,6 +817,7 @@ export function HistoryBackPanel({
               {conceptGroups.map((g) => (
                 <button
                   key={g.key}
+                  style={{ "--theme-color": themeColors.get(g.label) } as CSSProperties}
                   type="button"
                   className={
                     activeConcept === g.label

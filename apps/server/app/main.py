@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -48,6 +48,8 @@ async def lifespan(app: FastAPI):
     poll_task = asyncio.create_task(
         market_service.poll_loop(settings.poll_interval_sec, settings.idle_poll_interval_sec)
     )
+    fallback_theme_task = asyncio.create_task(market_service.ladder_fallback_worker())
+    theme_task = asyncio.create_task(market_service.ladder_theme_worker())
     alert_task = asyncio.create_task(market_service.alert_loop())
     fund_task = asyncio.create_task(market_service.fund_worker())
     gene_task = asyncio.create_task(market_service.gene_worker())
@@ -58,6 +60,8 @@ async def lifespan(app: FastAPI):
     yield
     for t in (
         poll_task,
+        theme_task,
+        fallback_theme_task,
         alert_task,
         fund_task,
         gene_task,
@@ -69,6 +73,8 @@ async def lifespan(app: FastAPI):
         t.cancel()
     for t in (
         poll_task,
+        theme_task,
+        fallback_theme_task,
         alert_task,
         fund_task,
         gene_task,
@@ -104,6 +110,15 @@ app.add_middleware(
 @app.get("/api/health")
 async def health():
     return {"ok": True, "updated_at": market_service.snapshot.updated_at}
+
+
+@app.get("/api/market/overview")
+async def get_market_overview():
+    from .services.market_overview import market_overview_service
+    try:
+        return await market_overview_service.get()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @app.get("/api/market")
@@ -502,6 +517,7 @@ def mount_static(application: FastAPI) -> None:
     static_dir = next((p for p in candidates if p.exists()), None)
     if not static_dir:
         return
+    static_dir = static_dir.resolve()
 
     assets = static_dir / "assets"
     if assets.exists():
@@ -513,7 +529,9 @@ def mount_static(application: FastAPI) -> None:
 
     @application.get("/{full_path:path}")
     async def spa(full_path: str):
-        target = static_dir / full_path
+        target = (static_dir / full_path).resolve()
+        if not target.is_relative_to(static_dir):
+            raise HTTPException(status_code=404, detail="Not found")
         if target.exists() and target.is_file():
             return FileResponse(target)
         return FileResponse(static_dir / "index.html")

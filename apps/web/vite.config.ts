@@ -38,6 +38,8 @@ function attachQuietProxy(proxy: { on: (event: string, fn: (...args: unknown[]) 
   });
 }
 
+const backendPort = Number(process.env.DINGPAN_PORT || 17831);
+
 export default defineConfig({
   plugins: [react(), quietDevProxyErrors()],
   server: {
@@ -47,12 +49,12 @@ export default defineConfig({
     strictPort: true,
     proxy: {
       "/api": {
-        target: "http://127.0.0.1:17831",
+        target: `http://127.0.0.1:${backendPort}`,
         // 类型断言：规避 Vite ProxyServer 与 @types/http-proxy 的 never 冲突
         configure: attachQuietProxy as (proxy: unknown) => void,
       },
       "/ws": {
-        target: "ws://127.0.0.1:17831",
+        target: `ws://127.0.0.1:${backendPort}`,
         ws: true,
         configure: attachQuietProxy as (proxy: unknown) => void,
       },

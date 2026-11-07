@@ -11,6 +11,7 @@ param(
 $ErrorActionPreference = "Stop"
 $OutputEncoding = [System.Text.Encoding]::UTF8
 try { chcp 65001 | Out-Null } catch { }
+$InitialPath = $env:Path
 $Root = Split-Path -Parent $PSScriptRoot
 $ToolsDir = Join-Path $Root ".tools"
 $VenvPython = Join-Path $Root ".venv\Scripts\python.exe"
@@ -34,7 +35,7 @@ function Write-Warn([string]$msg) {
 function Refresh-Path {
     $machine = [Environment]::GetEnvironmentVariable("Path", "Machine")
     $user = [Environment]::GetEnvironmentVariable("Path", "User")
-    $env:Path = "$ToolsDir\nodejs;$ToolsDir\python;$machine;$user"
+    $env:Path = "$InitialPath;$machine;$user"
     foreach ($extra in @(
             "$env:LOCALAPPDATA\Programs\Python\Python312",
             "$env:LOCALAPPDATA\Programs\Python\Python312\Scripts",
@@ -48,6 +49,7 @@ function Refresh-Path {
             $env:Path = "$extra;$env:Path"
         }
     }
+    $env:Path = "$ToolsDir\nodejs;$ToolsDir\python;$env:Path"
 }
 
 function Test-Command([string]$Name) {
@@ -88,8 +90,8 @@ function Get-NodeOk {
     if (-not (Test-Command "node")) { return $false }
     if (-not (Test-Command "npm")) { return $false }
     try {
-        $maj = [int]((& node -v).TrimStart("v").Split(".")[0])
-        return $maj -ge 18
+        $version = [version]((& node -v).Trim().TrimStart("v"))
+        return (($version.Major -eq 20 -and $version -ge [version]"20.19.0") -or $version -ge [version]"22.12.0")
     } catch {
         return $false
     }
@@ -118,10 +120,10 @@ function Install-WithWinget([string]$Id, [string]$DisplayName) {
 }
 
 function Install-PortableNode {
-    Write-Step "下载便携 Node.js 20 LTS 到 .tools\nodejs"
+    Write-Step "下载便携 Node.js 22 到 .tools\nodejs"
     New-Item -ItemType Directory -Force -Path $ToolsDir | Out-Null
     $zip = Join-Path $ToolsDir "node.zip"
-    $url = "https://nodejs.org/dist/v20.18.0/node-v20.18.0-win-x64.zip"
+    $url = "https://nodejs.org/dist/v22.14.0/node-v22.14.0-win-x64.zip"
     Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
     $extract = Join-Path $ToolsDir "node-extract"
     if (Test-Path $extract) { Remove-Item -Recurse -Force $extract }
@@ -203,7 +205,7 @@ function Ensure-Node {
         Write-Ok "已检测到 Node $((node -v)) / npm $((npm -v))"
         return
     }
-    if ($SkipInstallTools) { throw "未找到 Node.js 18+，请先安装" }
+    if ($SkipInstallTools) { throw "未找到 Node.js 20.19.x 或 22.12+，请先安装" }
 
     if (Install-WithWinget "OpenJS.NodeJS.LTS" "Node.js LTS") {
         Start-Sleep -Seconds 2
@@ -279,8 +281,12 @@ function Start-Services {
     $serverLog = Join-Path $LogDir "server.log"
     $webLog = Join-Path $LogDir "web.log"
 
+    if ((Test-PortOpen 17831) -or (Test-PortOpen 5173)) {
+        throw "端口 17831 或 5173 已占用，请先停止原实例或其他服务"
+    }
+
     if (Test-PortOpen 17831) {
-        Write-Warn "端口 17831 已被占用，将复用现有后端"
+        throw "端口 17831 已占用，请先停止原实例；不会复用未知服务"
     } else {
         Write-Step "启动后端 http://127.0.0.1:17831"
         $serverCmd = @"
@@ -290,11 +296,11 @@ Set-Location '$ServerDir'
 "@
         Start-Process -FilePath "powershell.exe" -ArgumentList @(
             "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", $serverCmd
-        ) -WindowStyle Minimized
+        ) -WindowStyle Hidden
     }
 
     if (Test-PortOpen 5173) {
-        Write-Warn "端口 5173 已被占用，将复用现有前端"
+        throw "端口 5173 已占用，请先停止原实例；不会复用未知服务"
     } else {
         Write-Step "启动前端 http://127.0.0.1:5173"
         $webCmd = @"
@@ -304,7 +310,7 @@ npm run dev *>> '$webLog'
 "@
         Start-Process -FilePath "powershell.exe" -ArgumentList @(
             "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", $webCmd
-        ) -WindowStyle Minimized
+        ) -WindowStyle Hidden
     }
 
     Write-Step "等待服务就绪"
@@ -340,5 +346,5 @@ Write-Host "全部完成。" -ForegroundColor Green
 Write-Host "  网页: http://127.0.0.1:5173/"
 Write-Host "  API : http://127.0.0.1:17831/api/health"
 Write-Host "  日志: $LogDir"
-Write-Host "关闭对应的最小化 PowerShell 窗口即可停止服务。"
+Write-Host "运行 停止盯盘.bat 停止当前目录的服务。"
 Write-Host ""

@@ -39,7 +39,7 @@ def _source_layout() -> tuple[Path, Path, Path] | None:
     return None
 
 
-def _node_major(node_exe: Path) -> int:
+def _node_supported(node_exe: Path) -> bool:
     try:
         out = subprocess.run(
             [str(node_exe), "-v"],
@@ -50,9 +50,13 @@ def _node_major(node_exe: Path) -> int:
             timeout=8,
         )
         raw = (out.stdout or out.stderr or "").strip().lstrip("v")
-        return int(raw.split(".")[0]) if raw else 0
+        version = tuple(int(part) for part in raw.split("."))
+        return out.returncode == 0 and (
+            (version[0] == 20 and version >= (20, 19, 0))
+            or version >= (22, 12, 0)
+        )
     except Exception:
-        return 0
+        return False
 
 
 def _iter_node_candidates(root: Path) -> list[Path]:
@@ -109,12 +113,11 @@ def _iter_node_candidates(root: Path) -> list[Path]:
 
 
 def _build_command() -> tuple[list[str], dict] | None:
-    """返回 (构建命令, 环境变量)。优先 Node >= 20（Vite 8）；避免系统 Node 14 假成功。"""
+    """返回 (构建命令, 环境变量)。优先 Node 20.19.x 或 22.12+（Vite 8）；避免系统 Node 14 假成功。"""
     root = Path(__file__).resolve().parents[2]
     env = os.environ.copy()
-    min_major = 20
     for node in _iter_node_candidates(root):
-        if _node_major(node) < min_major:
+        if not _node_supported(node):
             continue
         node_dir = str(node.parent)
         env["PATH"] = node_dir + os.pathsep + env.get("PATH", "")
@@ -190,7 +193,7 @@ def ensure_frontend_build() -> None:
     build = _build_command()
     if not build:
         print(
-            "[DingPan] 未找到 Node.js >= 20 / npm，跳过前端构建"
+            "[DingPan] 未找到 Node.js 20.19.x 或 22.12+ / npm，跳过前端构建"
             "（界面可能为旧版本；可用 nvm install 22 && nvm use 22）"
         )
         return
@@ -225,7 +228,7 @@ def ensure_frontend_build() -> None:
     if after <= before:
         print(
             "[DingPan] 前端 dist 未更新（可能 Node 过旧导致构建静默失败），"
-            "跳过同步；请使用 Node >= 20 后重试"
+            "跳过同步；请使用 Node 20.19.x 或 22.12+ 后重试"
         )
         return
     _sync_dist(dist, web_dist)
@@ -283,6 +286,11 @@ def main() -> None:
     env["DINGPAN_HOST"] = HOST
     env["DINGPAN_PORT"] = str(PORT)
 
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.settimeout(1)
+        if probe.connect_ex((HOST, PORT)) == 0:
+            raise RuntimeError(f"端口 {PORT} 已占用，请先停止当前盯盘实例或更换 DINGPAN_PORT")
+
     python = sys.executable
     proc = subprocess.Popen(
         [python, "-m", "uvicorn", "app.main:app", "--host", HOST, "--port", str(PORT)],
@@ -291,12 +299,12 @@ def main() -> None:
     )
 
     try:
-        if not _wait_port(HOST, PORT):
+        if not _wait_port(HOST, PORT) or proc.poll() is not None:
             raise RuntimeError("后端服务启动超时，请检查端口占用或依赖安装")
         import webview
 
         # pywebview 6.x：icon 在 start()，不在 create_window()
-        icon = _window_icon()
+        icon = _window_icon() if sys.platform == "win32" else None
         webview.create_window(
             "盯盘 · A股涨停盯盘",
             f"http://{HOST}:{PORT}/",

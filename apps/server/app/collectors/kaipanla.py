@@ -34,6 +34,16 @@ def _ts_to_hm(ts: Any) -> str:
         return ""
 
 
+def _ts_date(ts: Any) -> str:
+    try:
+        value = int(ts)
+        if value > 10_000_000_000:
+            value //= 1000
+        return datetime.fromtimestamp(value).strftime("%Y-%m-%d") if value > 0 else ""
+    except (TypeError, ValueError, OSError, OverflowError):
+        return ""
+
+
 def _f(v: Any, default: float = 0.0) -> float:
     try:
         if v is None or v == "":
@@ -79,6 +89,7 @@ def _parse_stock_row(row: list[Any], board: int) -> dict[str, Any] | None:
         "turnover": _f(row[14]),
         "seal_amount": _f(row[11]),
         "first_seal_time": _ts_to_hm(row[4]),
+        "seal_date": _ts_date(row[4]),
         "last_seal_time": "",
         "board_count": board_count,
         "open_times": _i(row[16]),
@@ -323,6 +334,29 @@ class KaipanlaClient:
             if int(live.get("count") or 0) > 0:
                 return live
         return hist
+
+    async def fetch_theme_map(self, date: str) -> dict[str, str]:
+        """与历史复盘共用主题材解析；实时库忽略 Day，逐股校验封板日期。"""
+        day = _day_label(date)
+        themes: dict[str, str] = {}
+
+        async def fetch_level(pid: int, source: str) -> None:
+            rows = await self.fetch_board_level(day, pid, source=source)
+            for row in rows:
+                if row.get("seal_date") != day:
+                    continue
+                reason = str(row.get("reason") or "").strip()
+                if reason:
+                    if source == "hist":
+                        themes[row["code"]] = reason
+                    else:
+                        themes.setdefault(row["code"], reason)
+
+        await asyncio.gather(*(fetch_level(pid, "hist") for pid in range(1, 13)))
+        if self._is_recent_calendar_date(date):
+            # 盘中实时库可能仍为昨日。仅接收封板日期相符的个股。
+            await asyncio.gather(*(fetch_level(pid, "live") for pid in range(1, 13)))
+        return themes
 
     async def fetch_expression(self, date: str) -> dict[str, Any]:
         day = _day_label(date)

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type {
   AlertEvent,
   LadderGroup,
@@ -99,25 +99,90 @@ export function useMarketSocket(
 ) {
   const [snapshot, setSnapshot] = useState<MarketSnapshot>(empty);
   const [connected, setConnected] = useState(false);
+  const [retryAttempt, setRetryAttempt] = useState(0);
+  const [retryDelayMs, setRetryDelayMs] = useState(0);
+  const reconnectRef = useRef<() => void>(() => undefined);
+  const reconnect = useCallback(() => reconnectRef.current(), []);
   const onSpeechRef = useRef(onSpeech);
   const onAlertRef = useRef(onAlert);
-  onSpeechRef.current = onSpeech;
-  onAlertRef.current = onAlert;
+  useLayoutEffect(() => {
+    onSpeechRef.current = onSpeech;
+    onAlertRef.current = onAlert;
+  }, [onSpeech, onAlert]);
 
   const connect = useCallback(() => {
     let ws: WebSocket | null = null;
     let closed = false;
     let timer: number | undefined;
+    let connectionTimer: number | undefined;
+    let failures = 0;
 
+    const clearTimers = () => {
+      if (timer !== undefined) window.clearTimeout(timer);
+      if (connectionTimer !== undefined) window.clearTimeout(connectionTimer);
+      timer = undefined;
+      connectionTimer = undefined;
+    };
+    const releaseSocket = () => {
+      const previous = ws;
+      ws = null;
+      if (previous) {
+        previous.onopen = previous.onclose = previous.onerror = previous.onmessage = null;
+        previous.close();
+      }
+    };
+    const scheduleRetry = () => {
+      if (closed || timer !== undefined) return;
+      if (connectionTimer !== undefined) window.clearTimeout(connectionTimer);
+      connectionTimer = undefined;
+      setConnected(false);
+      failures += 1;
+      const delay = Math.min(30_000, 2000 * 2 ** Math.min(failures - 1, 4));
+      setRetryAttempt(failures);
+      setRetryDelayMs(delay);
+      timer = window.setTimeout(() => {
+        timer = undefined;
+        setRetryDelayMs(0);
+        open();
+      }, delay);
+    };
     const open = () => {
-      ws = new WebSocket(wsUrl());
-      ws.onopen = () => setConnected(true);
-      ws.onclose = () => {
-        setConnected(false);
-        if (!closed) timer = window.setTimeout(open, 2000);
+      if (closed) return;
+      releaseSocket();
+      let socket: WebSocket;
+      try {
+        socket = new WebSocket(wsUrl());
+      } catch {
+        scheduleRetry();
+        return;
+      }
+      ws = socket;
+      // An unreachable backend must not leave the interface connecting forever.
+      connectionTimer = window.setTimeout(() => {
+        if (ws !== socket || closed) return;
+        releaseSocket();
+        scheduleRetry();
+      }, 10_000);
+      socket.onopen = () => {
+        if (ws !== socket || closed) return;
+        clearTimers();
+        failures = 0;
+        setConnected(true);
+        setRetryAttempt(0);
+        setRetryDelayMs(0);
       };
-      ws.onerror = () => ws?.close();
-      ws.onmessage = (ev) => {
+      socket.onclose = () => {
+        if (ws !== socket || closed) return;
+        releaseSocket();
+        scheduleRetry();
+      };
+      socket.onerror = () => {
+        if (ws !== socket || closed) return;
+        releaseSocket();
+        scheduleRetry();
+      };
+      socket.onmessage = (ev) => {
+        if (ws !== socket || closed) return;
         try {
           const data = JSON.parse(ev.data) as MarketSnapshot;
           setSnapshot((prev) => {
@@ -148,15 +213,32 @@ export function useMarketSocket(
       };
     };
 
+    const retryNow = () => {
+      if (closed) return;
+      clearTimers();
+      failures = 0;
+      setConnected(false);
+      setRetryAttempt(0);
+      setRetryDelayMs(0);
+      open();
+    };
+    const onOnline = () => {
+      // Network status is only a retry hint: a local backend can work offline.
+      if (!ws || ws.readyState === WebSocket.CLOSED) retryNow();
+    };
+    reconnectRef.current = retryNow;
+    window.addEventListener("online", onOnline);
     open();
     return () => {
       closed = true;
-      if (timer) window.clearTimeout(timer);
-      ws?.close();
+      reconnectRef.current = () => undefined;
+      window.removeEventListener("online", onOnline);
+      clearTimers();
+      releaseSocket();
     };
   }, []);
 
   useEffect(() => connect(), [connect]);
 
-  return { snapshot, connected };
+  return { snapshot, connected, retryAttempt, retryDelayMs, reconnect };
 }

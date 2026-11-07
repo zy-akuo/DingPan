@@ -1,22 +1,21 @@
 import { MoonOutlined, SettingOutlined, SunOutlined } from "@ant-design/icons";
-import { Button, ConfigProvider, Segmented, Tabs, Tag, theme as antTheme } from "antd";
+import { Button, ConfigProvider, Segmented, Tabs, theme as antTheme } from "antd";
 import zhCN from "antd/locale/zh_CN";
-import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useTransition } from "react";
+import { RequestFeedback } from "./components/RequestFeedback";
+import { ConnectionStatus } from "./components/ConnectionStatus";
 import { LadderView } from "./components/LadderView";
-import {
-  applyMonitorFilter,
-  collectRegions,
-  EMPTY_FILTER,
-  MonitorFilterBar,
-  type MonitorFilter,
-} from "./components/MonitorFilterBar";
-import { HistoryBackPanel, resolveHistoryDate } from "./components/HistoryBackPanel";
+import { MonitorFilterBar } from "./components/MonitorFilterBar";
+import { applyMonitorFilter, collectRegions, EMPTY_FILTER, type MonitorFilter } from "./lib/monitorFilter";
+import { HistoryBackPanel } from "./components/HistoryBackPanel";
+import { resolveHistoryDate } from "./lib/historyDate";
 import { MonitorTable } from "./components/MonitorTable";
 import { RiskPanel } from "./components/RiskPanel";
 import { SettingsDrawer } from "./components/SettingsDrawer";
 import { SpeedRankPanel } from "./components/SpeedRankPanel";
 import { StockChartModal } from "./components/StockChartModal";
 import { StockDetailDrawer } from "./components/StockDetailDrawer";
+import { MarketOverview } from "./components/MarketOverview";
 import { SummaryBar } from "./components/SummaryBar";
 import { AlertBroadcastPanel } from "./components/AlertBroadcastPanel";
 import { AuctionPanel } from "./components/AuctionPanel";
@@ -156,7 +155,7 @@ export default function App() {
 
   const pushRef = useRef<(events: import("./types").SpeechEvent[]) => void>(() => undefined);
   const pushAlertRef = useRef<(events: AlertEvent[]) => void>(() => undefined);
-  const { snapshot: rawSnapshot, connected } = useMarketSocket(
+  const { snapshot: rawSnapshot, connected, retryAttempt, retryDelayMs, reconnect } = useMarketSocket(
     (events) => pushRef.current(events),
     (events) => pushAlertRef.current(events),
   );
@@ -193,8 +192,10 @@ export default function App() {
     fields.alert_speech_enabled !== false,
     fields.alert_speech_types ?? [...DEFAULT_ALERT_SPEECH_TYPES],
   );
-  pushRef.current = push;
-  pushAlertRef.current = pushAlert;
+  useLayoutEffect(() => {
+    pushRef.current = push;
+    pushAlertRef.current = pushAlert;
+  }, [push, pushAlert]);
 
   const toggleTheme = useCallback(() => {
     setThemeMode((prev) => {
@@ -367,17 +368,14 @@ export default function App() {
         },
       }}
     >
+      <RequestFeedback />
       <div className={`app theme-${themeMode}`}>
+        <div className="market-top-shell">
         <header className="topbar">
           <div className="brand">
             <span className="logo">盯盘</span>
             <span className="sub">A股涨停实时盯盘</span>
-            <Tag color={connected ? "success" : "default"}>
-              {connected ? "已连接" : "重连中"}
-            </Tag>
-            {snapshot.updated_at && (
-              <span className="updated">更新 {snapshot.updated_at.slice(11)}</span>
-            )}
+            <ConnectionStatus connected={connected} retryAttempt={retryAttempt} retryDelayMs={retryDelayMs} updatedAt={snapshot.updated_at} onReconnect={reconnect} />
           </div>
           <div className="top-actions">
             <Segmented
@@ -405,7 +403,17 @@ export default function App() {
           </div>
         </header>
 
-        <SummaryBar summary={snapshot.summary} />
+        {!connected && retryAttempt > 0 && (
+          <div className="connection-banner" role="status">
+            <span>{snapshot.updated_at ? "行情连接已断开，当前显示上次收到的数据。" : "尚未连接行情服务，正在自动重试。"}</span>
+            <span>{retryDelayMs ? `自动重试间隔 ${retryDelayMs / 1000} 秒，也可点击「立即重连」。` : "正在重新连接…"}</span>
+          </div>
+        )}
+        <div className="market-dashboard">
+          <MarketOverview />
+          <SummaryBar summary={snapshot.summary} />
+        </div>
+        </div>
 
         {mainTab === "monitor" ? (
           <section className="panel">

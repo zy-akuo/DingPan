@@ -54,6 +54,8 @@ class StockItem(BaseModel):
     next_red_rate: float | None = None
     speed: float | None = None  # 5分钟涨速 %
     reason: str = ""  # 异动原因（涨停概念/题材）
+    reason_source: str = ""
+    reason_date: str = ""
     # 避雷啦 / 风险警示：st=其他风险警示, delist=退市风险(*ST), warn=潜在风险
     risk_tags: list[str] = Field(default_factory=list)
     risk_hint: str = ""

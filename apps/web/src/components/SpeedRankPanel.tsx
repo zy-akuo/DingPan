@@ -3,6 +3,7 @@ import {
   startTransition,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -25,9 +26,9 @@ import { MonitorTable } from "./MonitorTable";
 import {
   applySpeedFilter,
   EMPTY_SPEED_FILTER,
-  SpeedFilterBar,
   type SpeedFilter,
-} from "./SpeedFilterBar";
+} from "../lib/speedFilter";
+import { SpeedFilterBar } from "./SpeedFilterBar";
 import { StockChartModal } from "./StockChartModal";
 
 const SPEED_LIMIT = 50;
@@ -86,7 +87,9 @@ export function SpeedRankPanel({
   const boardRef = useRef(board);
   const failStreakRef = useRef(0);
   const pulseTimer = useRef<number | null>(null);
-  boardRef.current = board;
+  useLayoutEffect(() => {
+    boardRef.current = board;
+  }, [board]);
 
   useEffect(() => {
     rowsRef.current = rows;
@@ -103,7 +106,7 @@ export function SpeedRankPanel({
     pulseTimer.current = window.setTimeout(() => setPulse(false), 480);
   }, []);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async function refreshRank() {
     if (busyRef.current) {
       pendingRef.current = true;
       return;
@@ -204,7 +207,7 @@ export function SpeedRankPanel({
       busyRef.current = false;
       if (pendingRef.current && gen === genRef.current) {
         pendingRef.current = false;
-        void refresh();
+        void refreshRank();
       } else {
         pendingRef.current = false;
       }

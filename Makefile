@@ -1,7 +1,7 @@
 # 钉盘开发入口（macOS/Linux）。Windows 用户请继续使用 start-dev.bat / start-desktop.bat
-.PHONY: dev setup desktop clean help
+.PHONY: dev setup desktop stop clean help
 
-DEFAULT_GOAL := help
+.DEFAULT_GOAL := help
 
 dev:      ## 一键开发：后端 --reload(后台) + 前端 HMR(前台) + 自动开浏览器
 	bash scripts/dev.sh
@@ -11,6 +11,9 @@ setup:    ## 仅准备环境（uv/venv + 前后端依赖），不启动服务
 
 desktop:  ## 按需增量构建前端并打开 pywebview 桌面窗口
 	bash scripts/dev.sh --desktop
+
+stop:     ## 仅停止当前目录的盯盘进程
+	bash scripts/dev.sh --stop
 
 clean:    ## 删除 .venv 虚拟环境
 	rm -rf .venv

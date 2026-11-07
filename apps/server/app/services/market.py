@@ -207,6 +207,8 @@ def _fund_list_complete(fund: dict[str, Any] | None) -> bool:
 def _apply_fund_fields(stock: StockItem, fund: dict[str, Any]) -> None:
     if fund.get("concepts"):
         stock.concepts = fund["concepts"] or stock.concepts
+    if fund.get("concept_themes"):
+        stock.concept_themes = fund["concept_themes"]
     if fund.get("region"):
         stock.region = fund["region"]
     if fund.get("industry"):
@@ -281,6 +283,12 @@ class MarketService:
         self._gene_inflight: set[str] = set()
         self._gene_complete: set[str] = set()
         self._gene_retry_at: dict[str, float] = {}
+        self._ladder_theme_date = ""
+        self._ladder_themes: dict[str, str] = {}
+        self._fallback_theme_date = ""
+        self._fallback_themes: dict[str, tuple[str, str, str]] = {}
+        self._previous_theme_date = ""
+        self._previous_themes: dict[str, str] = {}
         self._ths = None  # lazy ThsClient
         self._y_zt: list[dict[str, Any]] = []
         self._y_zb_count = 0
@@ -2007,6 +2015,8 @@ class MarketService:
                 [s for g in ladder for s in g.stocks]
             )
 
+            self._apply_ladder_themes(date, zt + lb + zb + dt + [s for g in ladder for s in g.stocks])
+
             # 叠加避雷啦风险标签
             self._apply_risk_to_lists(zt, lb, zb, dt)
             self._apply_risk_to_ladder(ladder)
@@ -2040,6 +2050,110 @@ class MarketService:
             # 播报事件只推一次，避免基本面补齐等再次广播时轮播
             self.snapshot.speech_events = []
             return self.snapshot
+
+    def _apply_ladder_themes(self, date: str, stocks: list[StockItem]) -> None:
+        from .ladder_theme import concept_fallback
+
+        for stock in stocks:
+            theme = self._ladder_themes.get(stock.code) if self._ladder_theme_date == date else None
+            if theme:
+                choice = (theme, "kaipanla", date)
+            else:
+                choice = (self._fallback_themes.get(stock.code)
+                          if self._fallback_theme_date == date else None)
+                if not choice and self._previous_theme_date == self._y_pool_date and self._y_pool_date < date:
+                    previous = self._previous_themes.get(stock.code)
+                    if previous:
+                        choice = (previous, "previous_kaipanla", self._previous_theme_date)
+                choice = choice or concept_fallback(stock)
+            stock.reason, stock.reason_source, stock.reason_date = choice
+
+    async def ladder_fallback_worker(self) -> None:
+        """当日原因优于近期复盘，细分概念可立即展示；与开盘啦抓取独立。"""
+        from ..collectors.ths import ThsClient
+        from ..collectors.kaipanla import KaipanlaClient
+        from .ladder_theme import normalize_theme
+
+        ths = ThsClient(timeout=5)
+        try:
+            while True:
+                date = self.snapshot.trade_date
+                if self._fallback_theme_date != date:
+                    self._fallback_theme_date = date
+                    self._fallback_themes = {}
+                try:
+                    results = await asyncio.gather(
+                        ths.fetch_limit_up_pool(date), ths.fetch_open_limit_pool(date),
+                        return_exceptions=True,
+                    )
+                    if self.snapshot.trade_date == date:
+                        for rows in results:
+                            if not isinstance(rows, list):
+                                continue
+                            for row in rows:
+                                # 有时间戳时再核验，拒绝接口忽略日期返回的旧池。
+                                stamp = row.get("first_limit_up_time")
+                                if stamp:
+                                    try:
+                                        value = float(stamp)
+                                        if value > 10_000_000_000:
+                                            value /= 1000
+                                        if datetime.fromtimestamp(value).strftime("%Y%m%d") != date:
+                                            continue
+                                    except (ValueError, TypeError, OSError, OverflowError):
+                                        continue
+                                theme = normalize_theme(row.get("reason_type") or "")
+                                code = str(row.get("code") or "").zfill(6)
+                                if theme and code.isdigit() and len(code) == 6:
+                                    self._fallback_themes[code] = (theme, "ths", date)
+                        stocks = (self.snapshot.zt + self.snapshot.lb + self.snapshot.zb + self.snapshot.dt
+                                  + [s for g in self.snapshot.ladder for s in g.stocks])
+                        self._apply_ladder_themes(date, stocks)
+                        await self._broadcast()
+                except Exception:
+                    pass
+                # 昨日复盘仅作有明确日期的候选，不写成今日开盘啦结论。
+                previous_date = self._y_pool_date
+                if previous_date and previous_date < date and self._previous_theme_date != previous_date:
+                    client = KaipanlaClient(timeout=5)
+                    try:
+                        themes = await asyncio.wait_for(client.fetch_theme_map(previous_date), timeout=12)
+                        if themes:
+                            self._previous_themes = themes
+                            self._previous_theme_date = previous_date
+                    except Exception:
+                        pass
+                    finally:
+                        await client.aclose()
+                await asyncio.sleep(15)
+        finally:
+            await ths.aclose()
+
+    async def ladder_theme_worker(self) -> None:
+        """题材慢字段独立更新，不阻塞行情轮询；仅保留同交易日缓存。"""
+        from ..collectors.kaipanla import KaipanlaClient
+
+        while True:
+            date = self.snapshot.trade_date
+            if self._ladder_theme_date != date:
+                self._ladder_themes = {}
+                self._ladder_theme_date = date
+            client = KaipanlaClient(timeout=6)
+            try:
+                themes = await asyncio.wait_for(client.fetch_theme_map(date), timeout=20)
+                if self.snapshot.trade_date == date:
+                    self._ladder_themes.update(themes)
+                    stocks = (self.snapshot.zt + self.snapshot.lb + self.snapshot.zb + self.snapshot.dt
+                              + [s for g in self.snapshot.ladder for s in g.stocks])
+                    self._apply_ladder_themes(date, stocks)
+                    if themes:
+                        await self._broadcast()
+            except Exception:
+                # 瞬时失败保留当日已确认题材，下次继续获取。
+                pass
+            finally:
+                await client.aclose()
+            await asyncio.sleep(60)
 
     async def poll_loop(self, interval_trading: float, interval_idle: float) -> None:
         from ..db import load_user_config
@@ -2520,6 +2634,11 @@ class MarketService:
                 if s.code == code:
                     _apply_fund_fields(s, fund)
                     hit = True
+        if hit:
+            stocks = ([s for bucket in (self.snapshot.zt, self.snapshot.lb, self.snapshot.zb, self.snapshot.dt)
+                       for s in bucket if s.code == code]
+                      + [s for g in self.snapshot.ladder for s in g.stocks if s.code == code])
+            self._apply_ladder_themes(self.snapshot.trade_date, stocks)
         return hit
 
     async def fund_worker(self) -> None:
@@ -3815,10 +3934,10 @@ class MarketService:
                 return cand, local
         return "", []
 
-    async def _yesterday_board_map(self) -> dict[str, int]:
+    async def _yesterday_board_map(self, date: str | None = None) -> dict[str, int]:
         """code -> 昨日连板数（用于「昨N板」标签）。"""
         try:
-            _ds, rows = await self._prev_trade_zt_pool()
+            _ds, rows = await self._prev_trade_zt_pool(date)
         except Exception:
             rows = []
         out: dict[str, int] = {}
@@ -3827,6 +3946,25 @@ class MarketService:
             if code.isdigit():
                 out[code] = max(1, int(r.get("board_count") or 1))
         return out
+
+    @staticmethod
+    def _auction_board_badge(row: dict[str, Any], yesterday_board: int) -> tuple[int, str]:
+        """竞价板数以展示日的昨池为基准，不使用盘后实时连板数。"""
+        code = str(row.get("code") or "")
+        name = str(row.get("name") or "")
+        pct = float(row.get("auction_pct") or 0)
+        auction_price = next((float(row.get(key) or 0) for key in ("price_0925", "price_0920", "price_0915", "price") if float(row.get(key) or 0) > 0), 0.0)
+        limit_price = float(row.get("limit_up") or 0)
+        if not limit_price and auction_price > 0 and pct > -100:
+            previous_close = round(auction_price / (1 + pct / 100), 2)
+            limit_price = infer_limit_up(code, name, previous_close)
+        at_limit = bool(row.get("is_yizhi")) or (auction_price > 0 and limit_price > 0 and abs(auction_price - limit_price) < 0.005)
+        if yesterday_board > 0 and at_limit:
+            board = yesterday_board + 1
+            return board, f"{board}板"
+        if yesterday_board >= 2:
+            return yesterday_board, f"昨{yesterday_board}板"
+        return 1, ""
 
     async def _enrich_auction_rows(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """竞价行补齐地域/连板标签。高频路径用批量 fundamentals，避免逐只打库。"""
@@ -3879,18 +4017,7 @@ class MarketService:
                 concepts = [industry]
             yb = int(yboard.get(code) or 0)
             pct = float(r.get("auction_pct") or 0)
-            limit_up = float(r.get("limit_up") or 0)
-            price = float(r.get("price") or 0)
-            near_limit = limit_up > 0 and price > 0 and abs(price - limit_up) < 1e-4
-            if near_limit and yb > 0:
-                board = yb + 1
-                board_tag = "首板" if board <= 1 else f"{board}板"
-            elif yb > 0:
-                board = yb
-                board_tag = f"昨{yb}板"
-            else:
-                board = 1
-                board_tag = "首板" if near_limit else ""
+            board, board_tag = self._auction_board_badge(r, yb)
             out.append(
                 {
                     **r,
@@ -4825,6 +4952,16 @@ class MarketService:
                     x["seal_0920"] = None
                     x["seal_0925"] = None
             col = self._finalize_auction_column_sort(col)
+
+        # 历史快照也按其展示日期回填，修复旧快照缺失或错误板数标签。
+        try:
+            previous_boards = await self._yesterday_board_map(req_date)
+            for item in col.get("items") or []:
+                item["board_count"], item["board_tag"] = self._auction_board_badge(
+                    item, previous_boards.get(str(item.get("code") or ""), 0)
+                )
+        except Exception:
+            pass
 
         date_options = [{"date": req_date, "date_label": label}] if req_date else []
         result = {

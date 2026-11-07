@@ -4,7 +4,7 @@ import {
   DeleteOutlined,
   PlusOutlined,
 } from "@ant-design/icons";
-import { Button, Checkbox, Drawer, InputNumber, Space, Switch } from "antd";
+import { Button, Checkbox, Drawer, Input, InputNumber, Space, Switch } from "antd";
 import { useEffect, useMemo, useState } from "react";
 import type { FieldConfig } from "../types";
 import {
@@ -12,6 +12,56 @@ import {
   DEFAULT_SPEED_TABLE_COLUMNS,
   normalizeSpeedTableColumns,
 } from "../types";
+
+function OrderedFieldManager({ title, description, columns, choices, labels, onChange, keepName = false }: {
+  title: string;
+  description: string;
+  columns: string[];
+  choices: readonly string[];
+  labels: Record<string, string>;
+  onChange: (columns: string[]) => void;
+  keepName?: boolean;
+}) {
+  const [query, setQuery] = useState("");
+  const selected = [...new Set(columns)];
+  const omitted = choices.filter((key) => !selected.includes(key));
+  const move = (index: number, direction: -1 | 1) => {
+    const next = [...selected];
+    const target = index + direction;
+    if (target < 0 || target >= next.length) return;
+    [next[index], next[target]] = [next[target], next[index]];
+    onChange(next);
+  };
+  return (
+    <section className="settings-block settings-field-manager">
+      <div className="settings-section-heading"><h4>{title}</h4><span className="muted">已展示 {selected.length} 项</span></div>
+      <p className="settings-section-description">{description}</p>
+      <div className="speed-col-order">
+        {selected.map((key, index) => {
+          const label = labels[key] || key;
+          const required = keepName && key === "name";
+          return <div key={key} className="speed-col-order-row">
+            <span className="speed-col-order-label"><span className="settings-field-index">{index + 1}.</span>{label}</span>
+            <Space size={4}>
+              <Button size="small" icon={<ArrowUpOutlined />} disabled={index === 0} title={`上移${label}`} aria-label={`上移${label}`} onClick={() => move(index, -1)} />
+              <Button size="small" icon={<ArrowDownOutlined />} disabled={index === selected.length - 1} title={`下移${label}`} aria-label={`下移${label}`} onClick={() => move(index, 1)} />
+              <Button size="small" danger icon={<DeleteOutlined />} disabled={required} title={required ? "名称列保留" : `移除${label}`} aria-label={`移除${label}`} onClick={() => onChange(selected.filter((value) => value !== key))} />
+            </Space>
+          </div>;
+        })}
+        {!selected.length && <div className="settings-field-empty">暂无展示字段，可从下方添加。</div>}
+      </div>
+      {omitted.length > 0 && <div className="speed-col-omitted">
+        <div className="settings-section-heading"><span className="speed-col-omitted-title">未展示 · {omitted.length} 项</span>
+          <Input size="small" allowClear placeholder="搜索可添加字段" value={query} onChange={(event) => setQuery(event.target.value)} style={{ width: 170 }} />
+        </div>
+        <div className="settings-field-options">
+          {omitted.filter((key) => (labels[key] || key).includes(query.trim())).map((key) => <Button key={key} size="small" icon={<PlusOutlined />} onClick={() => onChange([...selected, key])}>{labels[key] || key}</Button>)}
+        </div>
+      </div>}
+    </section>
+  );
+}
 
 export function SettingsDrawer({
   open,
@@ -33,6 +83,8 @@ export function SettingsDrawer({
     if (open) {
       setDraft({
         ...value,
+        table_columns: [...new Set(value.table_columns.includes("name") ? value.table_columns : ["name", ...value.table_columns])],
+        detail_fields: [...new Set(value.detail_fields)],
         speed_table_columns: normalizeSpeedTableColumns(value.speed_table_columns),
       });
     }
@@ -51,39 +103,13 @@ export function SettingsDrawer({
     [draft.speed_table_columns],
   );
 
-  const moveSpeedCol = (index: number, dir: -1 | 1) => {
-    const next = [...speedCols];
-    const j = index + dir;
-    if (j < 0 || j >= next.length) return;
-    const tmp = next[index];
-    next[index] = next[j];
-    next[j] = tmp;
-    setDraft({ ...draft, speed_table_columns: next });
-  };
-
-  const removeSpeedCol = (key: string) => {
-    if (key === "name") return;
-    setDraft({
-      ...draft,
-      speed_table_columns: speedCols.filter((k) => k !== key),
-    });
-  };
-
-  const addSpeedCol = (key: string) => {
-    if (speedCols.includes(key)) return;
-    setDraft({ ...draft, speed_table_columns: [...speedCols, key] });
-  };
-
-  const omittedSpeedCols = DEFAULT_SPEED_TABLE_COLUMNS.filter(
-    (k) => !speedCols.includes(k),
-  );
-
   return (
     <Drawer
       title="显示与播报设置"
       open={open}
       onClose={onClose}
-      width={440}
+      width="min(560px, 100vw)"
+      rootClassName="settings-drawer"
       extra={
         <Space>
           <Button onClick={onClose}>取消</Button>
@@ -349,88 +375,27 @@ export function SettingsDrawer({
         </Space>
       </div>
 
-      <div className="settings-block">
-        <h4>表格列（可配置基本面）</h4>
-        <Checkbox.Group
-          style={{ display: "flex", flexDirection: "column", gap: 8 }}
-          options={Object.entries(available).map(([k, label]) => ({
-            label,
-            value: k,
-          }))}
-          value={draft.table_columns}
-          onChange={(v) => setDraft({ ...draft, table_columns: v as string[] })}
-        />
-      </div>
-
-      <div className="settings-block">
-        <h4>涨速榜列（顺序可调）</h4>
-        <div style={{ color: "var(--muted)", fontSize: 12, marginBottom: 8, lineHeight: 1.5 }}>
-          可用上下箭头调整顺序，也可删除不需要的展示列。名称列保留。与监控表格列配置独立。
-        </div>
-        <div className="speed-col-order">
-          {speedCols.map((key, i) => (
-            <div key={key} className="speed-col-order-row">
-              <span className="speed-col-order-label">
-                {i + 1}. {available[key] || key}
-              </span>
-              <Space size={4}>
-                <Button
-                  size="small"
-                  icon={<ArrowUpOutlined />}
-                  disabled={i === 0}
-                  onClick={() => moveSpeedCol(i, -1)}
-                />
-                <Button
-                  size="small"
-                  icon={<ArrowDownOutlined />}
-                  disabled={i === speedCols.length - 1}
-                  onClick={() => moveSpeedCol(i, 1)}
-                />
-                <Button
-                  size="small"
-                  danger
-                  icon={<DeleteOutlined />}
-                  disabled={key === "name"}
-                  title={key === "name" ? "名称列保留" : "删除该展示列"}
-                  onClick={() => removeSpeedCol(key)}
-                />
-              </Space>
-            </div>
-          ))}
-        </div>
-        {omittedSpeedCols.length ? (
-          <div className="speed-col-omitted">
-            <div className="speed-col-omitted-title">未展示</div>
-            {omittedSpeedCols.map((key) => (
-              <div key={key} className="speed-col-order-row">
-                <span className="speed-col-order-label muted">
-                  {available[key] || key}
-                </span>
-                <Button
-                  size="small"
-                  icon={<PlusOutlined />}
-                  onClick={() => addSpeedCol(key)}
-                >
-                  添加
-                </Button>
-              </div>
-            ))}
-          </div>
-        ) : null}
-      </div>
-
-      <div className="settings-block">
-        <h4>详情抽屉字段</h4>
-        <Checkbox.Group
-          style={{ display: "flex", flexDirection: "column", gap: 8 }}
-          options={Object.entries(available).map(([k, label]) => ({
-            label,
-            value: k,
-          }))}
-          value={draft.detail_fields}
-          onChange={(v) => setDraft({ ...draft, detail_fields: v as string[] })}
-        />
-      </div>
+      <OrderedFieldManager
+        title="表格列管理"
+        description="按列表顺序展示监控表格列。使用箭头调整顺序，移除后可随时添加，名称列保留。"
+        columns={draft.table_columns}
+        choices={Object.keys(available)} labels={available} keepName
+        onChange={(columns) => setDraft({ ...draft, table_columns: columns })}
+      />
+      <OrderedFieldManager
+        title="涨速榜列管理"
+        description="调整涨速榜展示列与顺序，名称列保留。此配置与监控表格独立。"
+        columns={speedCols}
+        choices={DEFAULT_SPEED_TABLE_COLUMNS} labels={available} keepName
+        onChange={(columns) => setDraft({ ...draft, speed_table_columns: columns })}
+      />
+      <OrderedFieldManager
+        title="个股抽屉详情管理"
+        description="按列表顺序展示个股详情中的基本字段，使用箭头排序，移除后可在下方补回。"
+        columns={draft.detail_fields}
+        choices={Object.keys(available)} labels={available}
+        onChange={(columns) => setDraft({ ...draft, detail_fields: columns })}
+      />
     </Drawer>
   );
 }
