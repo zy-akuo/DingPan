@@ -2707,7 +2707,7 @@ body {
 .market-index-hero { padding: 12px 18px 8px; }
 .market-metric-label { color: var(--muted); font-size: 12px; display: flex; align-items: center; gap: 10px; }
 .market-metric-label span { font-size: 11px; opacity: .8; }
-.market-index-value { font-size: 34px; font-weight: 750; line-height: 1.25; font-variant-numeric: tabular-nums; margin-top: 4px; letter-spacing: -.5px; }
+.market-index-value { font-size: 16px; font-weight: 700; line-height: 1.25; font-variant-numeric: tabular-nums; margin-top: 4px; letter-spacing: -.5px; }
 .market-index-change { display: flex; gap: 14px; font-size: 14px; font-variant-numeric: tabular-nums; }
 .market-data-time { color: var(--muted); font-size: 11px; margin-top: 5px; }
 .market-sparkline { padding: 10px 16px 4px 0; min-width: 0; }
@@ -2717,8 +2717,8 @@ body {
 .market-chart-placeholder { display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 12px; min-height: 110px; }
 .market-turnover,.market-comparison { padding: 9px 18px; border-top: 1px solid var(--line); }
 .market-comparison { border-left: 1px solid var(--line); }
-.market-turnover-value,.market-delta-value { display: inline-block; font-size: 23px; margin-top: 4px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.market-delta-value { font-size: 21px; }
+.market-turnover-value,.market-delta-value { display: inline-block; font-size: 16px; margin-top: 4px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.market-delta-value { font-size: 16px; }
 .market-secondary-metric { display: inline-block; margin-left: 14px; color: var(--muted); font-size: 11px; }
 .market-secondary-metric b { color: var(--text); margin-left: 6px; font-weight: 500; }
 .market-delta-pct { display: inline-block; font-size: 13px; margin-left: 10px; }
@@ -2735,7 +2735,7 @@ body {
 .market-sentiment-card:nth-child(odd) { border-right: 1px solid var(--line); }
 .market-sentiment-card:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
 .market-sentiment-label { font-size: 12px; color: var(--muted); white-space: nowrap; }
-.market-sentiment-card > strong { font-size: 27px; line-height: 1.2; font-variant-numeric: tabular-nums; text-align: right; }
+.market-sentiment-card > strong { font-size: 16px; line-height: 1.2; font-variant-numeric: tabular-nums; text-align: right; }
 .market-sentiment-yesterday { grid-column: 1 / -1; color: var(--muted); font-size: 11px; display: flex; justify-content: space-between; }
 .market-sentiment-yesterday b { font-weight: 500; }
 .market-summary-amber { color: var(--accent); }
@@ -2743,7 +2743,7 @@ body {
  .market-dashboard { grid-template-columns: minmax(0, 1.9fr) minmax(0, 1fr); gap: 8px; }
  .market-index-hero,.market-turnover,.market-comparison { padding: 9px 12px; }
  .market-sentiment-card { padding: 8px 10px; gap: 4px 6px; }
- .market-sentiment-card > strong { font-size: 23px; }
+ .market-sentiment-card > strong { font-size: 16px; }
  .market-secondary-metric,.market-comparison .market-data-time { display: block; margin-left: 0; margin-top: 4px; }
 }
 @media (max-width: 700px) {
@@ -2760,7 +2760,7 @@ body {
 .market-index-hero { padding: 7px 14px 5px; }
 .market-metric-label { font-size: 11px; gap: 8px; }
 .market-metric-label span { font-size: 10px; }
-.market-index-value { font-size: 27px; margin-top: 1px; line-height: 1.15; }
+.market-index-value { font-size: 16px; margin-top: 1px; line-height: 1.15; }
 .market-index-change { font-size: 12px; gap: 10px; }
 .market-data-time { font-size: 10px; margin-top: 2px; }
 .market-sparkline { padding: 6px 12px 2px 0; }
@@ -2768,8 +2768,8 @@ body {
 .market-sparkline svg { height: 68px; }
 .market-chart-placeholder { min-height: 78px; font-size: 11px; }
 .market-turnover,.market-comparison { padding: 5px 14px; }
-.market-turnover-value { font-size: 19px; margin-top: 2px; }
-.market-delta-value { font-size: 18px; margin-top: 2px; }
+.market-turnover-value { font-size: 16px; margin-top: 2px; }
+.market-delta-value { font-size: 16px; margin-top: 2px; }
 .market-secondary-metric { font-size: 10px; margin-left: 10px; }
 .market-delta-pct { font-size: 11px; margin-left: 8px; }
 .market-comparison .market-data-time { margin-left: 8px; }
@@ -2779,12 +2779,12 @@ body {
 .market-sentiment-heading > span { font-size: 10px; }
 .market-sentiment-card { padding: 6px 12px; gap: 2px 8px; }
 .market-sentiment-label { font-size: 11px; }
-.market-sentiment-card > strong { font-size: 22px; }
+.market-sentiment-card > strong { font-size: 16px; }
 .market-sentiment-yesterday { font-size: 10px; }
 @media (max-width: 1100px) {
  .market-index-hero,.market-turnover,.market-comparison { padding: 5px 10px; }
  .market-sentiment-card { padding: 5px 8px; }
- .market-sentiment-card > strong { font-size: 20px; }
+ .market-sentiment-card > strong { font-size: 16px; }
  .market-secondary-metric,.market-comparison .market-data-time { margin-left: 0; margin-top: 2px; }
 }
 
@@ -2801,12 +2801,12 @@ body {
 .market-sentiment-card:not(:nth-child(3n)) { border-right: 1px solid var(--line) !important; }
 @media (max-width: 1100px) {
  .market-sentiment-card { padding: 5px 7px; gap: 2px 4px; }
- .market-sentiment-card > strong { font-size: 18px; }
+ .market-sentiment-card > strong { font-size: 16px; }
 }
 
 /* 成交数据与右侧情绪指标使用同一字号层级。 */
 .market-turnover-value,
-.market-delta-value { font-size: 22px; }
+.market-delta-value { font-size: 16px; }
 .market-turnover .market-metric-label,
 .market-comparison .market-metric-label { font-size: 11px; }
 .market-secondary-metric,
@@ -2814,7 +2814,7 @@ body {
 .market-comparison .market-data-time { font-size: 10px; }
 @media (max-width: 1100px) {
  .market-turnover-value,
- .market-delta-value { font-size: 18px; }
+ .market-delta-value { font-size: 16px; }
 }
 
 .market-sparkline-caption { align-items: center; padding-left: 8px; gap: 8px; }
